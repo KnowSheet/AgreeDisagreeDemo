@@ -230,10 +230,10 @@ struct ListenOnTestPort {
   }
 };
 
-struct UnitTestStreamListener {
+struct UnitTestStorageListener {
   std::atomic_size_t n;
   std::string data;
-  UnitTestStreamListener() : n(0u) {}
+  UnitTestStorageListener() : n(0u) {}
   inline bool Entry(const std::unique_ptr<storage::Record>& entry) {
     data += JSON(entry, "record") + "\n";
     ++n;
@@ -262,7 +262,7 @@ TEST(AgreeDisagreeDemo, EndpointsAndScope) {
 TEST(AgreeDisagreeDemo, Questions) {
   storage::AgreeDisagreeStorage storage("test2");
 
-  UnitTestStreamListener listener;
+  UnitTestStorageListener listener;
   auto listener_scope = storage.Subscribe(listener);
 
   const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
