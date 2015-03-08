@@ -22,16 +22,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 *******************************************************************************/
 
+#define BRICKS_MOCK_TIME
+
 #include "../Bricks/port.h"
 
 #include <string>
 
 #include "../Bricks/cerealize/cerealize.h"
+#include "../Bricks/time/chrono.h"
 #include "../Bricks/util/singleton.h"
 #include "../Bricks/strings/printf.h"
 #include "../Bricks/net/api/api.h"
 #include "../Bricks/dflags/dflags.h"
 #include "../Bricks/3party/gtest/gtest-main-with-dflags.h"
+
+#include "../Sherlock/sherlock.h"
 
 using bricks::Singleton;
 using bricks::strings::Printf;
@@ -42,15 +47,56 @@ DEFINE_int32(test_port, 3000, "Local port to use for the test.");
 
 namespace storage {
 
+// Types for the storage.
+
 typedef std::string UID;
 enum class QID : size_t { NONE = 0 };
 
+// Types defining storage records.
+
+struct Record {
+  virtual ~Record() = default;
+  bricks::time::EPOCH_MILLISECONDS ms;
+  template <typename A>
+  void serialize(A& ar) {
+    ar(CEREAL_NVP(ms));
+  }
+};
+
+struct AddUser : Record {
+  UID uid;
+  template <typename A>
+  void serialize(A& ar) {
+    Record::serialize(ar);
+    ar(CEREAL_NVP(uid));
+  }
+};
+
+struct AddQuestion : Record {
+  QID qid;
+  std::string text;
+  template <typename A>
+  void serialize(A& ar) {
+    Record::serialize(ar);
+    ar(CEREAL_NVP(qid), CEREAL_NVP(text));
+  }
+};
+
+}  // namespace storage
+
+CEREAL_REGISTER_TYPE_WITH_NAME(storage::AddUser, "U");
+CEREAL_REGISTER_TYPE_WITH_NAME(storage::AddQuestion, "Q");
+
+namespace storage {
+// The `AgreeDisagreeStorage` class, the instance of which governs
+// low-level HTTP endpoints and the Sherlock stream for this instance of `AgreeDisagreeDemo`.
+
 class AgreeDisagreeStorage final {
  public:
-  struct Question {
+  // HTTP response schemas.
+  struct Question final {
     Question() {}
     QID qid;
-    size_t id;
     std::string text;
     template <typename A>
     void serialize(A& ar) {
@@ -58,7 +104,7 @@ class AgreeDisagreeStorage final {
     }
   };
 
-  struct User {
+  struct User final {
     User() {}
     UID uid;
     std::map<QID, bool> answers;
@@ -71,7 +117,10 @@ class AgreeDisagreeStorage final {
   // Registers HTTP endpoints for the provided client name.
   // Ensures that questions indexing will start from 1 by adding a dummy question with index 0.
   explicit AgreeDisagreeStorage(const std::string& client_name)
-      : client_name_(client_name), questions_({Question()}), questions_reverse_index_({{"", QID::NONE}}) {
+      : client_name_(client_name),
+        sherlock_stream_(sherlock::Stream<std::unique_ptr<Record>>(client_name + "_storage")),
+        questions_({Question()}),
+        questions_reverse_index_({{"", QID::NONE}}) {
     HTTP(FLAGS_test_port).Register("/" + client_name_, [](Request r) { r("OK\n"); });
     HTTP(FLAGS_test_port).Register("/" + client_name_ + "/q",
                                    std::bind(&AgreeDisagreeStorage::HandleQ, this, std::placeholders::_1));
@@ -84,6 +133,12 @@ class AgreeDisagreeStorage final {
     HTTP(FLAGS_test_port).UnRegister("/" + client_name_);
     HTTP(FLAGS_test_port).UnRegister("/" + client_name_ + "/q");
     HTTP(FLAGS_test_port).UnRegister("/" + client_name_ + "/u");
+  }
+
+  template <typename F>
+  typename sherlock::StreamInstanceImpl<std::unique_ptr<Record>>::template ListenerScope<F> Subscribe(
+      F& listener) {
+    return sherlock_stream_.Subscribe(listener);
   }
 
  private:
@@ -111,6 +166,11 @@ class AgreeDisagreeStorage final {
         new_question.qid = qid;
         new_question.text = text;
         questions_reverse_index_[text] = qid;
+        AddQuestion record;
+        record.ms = r.timestamp;
+        record.qid = qid;
+        record.text = text;
+        sherlock_stream_.Publish(record);
         r(new_question, "question");
       }
     } else {
@@ -148,6 +208,8 @@ class AgreeDisagreeStorage final {
 
   const std::string client_name_;
 
+  sherlock::StreamInstance<std::unique_ptr<Record>> sherlock_stream_;
+
   std::vector<Question> questions_;
   std::map<std::string, QID> questions_reverse_index_;
 
@@ -168,6 +230,21 @@ struct ListenOnTestPort {
   }
 };
 
+struct UnitTestStreamListener {
+  std::atomic_size_t n;
+  std::string data;
+  UnitTestStreamListener() : n(0u) {}
+  inline bool Entry(const std::unique_ptr<storage::Record>& entry) {
+    data += JSON(entry, "record") + "\n";
+    ++n;
+    return true;
+  }
+  inline void Terminate() {
+    data += "DONE\n";
+    ++n;
+  }
+};
+
 TEST(AgreeDisagreeDemo, EndpointsAndScope) {
   const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
   // `/test1` is inactive. Ensure that an HTTP server is listening on the port though.
@@ -184,10 +261,16 @@ TEST(AgreeDisagreeDemo, EndpointsAndScope) {
 
 TEST(AgreeDisagreeDemo, Questions) {
   storage::AgreeDisagreeStorage storage("test2");
+
+  UnitTestStreamListener listener;
+  auto listener_scope = storage.Subscribe(listener);
+
   const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
   // The question with QID=1 does not exist.
   EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test2/q?qid=1")).code));
   // A question can be added and gets a QID of 1.
+  EXPECT_EQ(0u, listener.n);
+  bricks::time::SetNow(bricks::time::EPOCH_MILLISECONDS(1001));
   const auto added = HTTP(POST(url_prefix + "/test2/q?text=Why%3F"));
   EXPECT_EQ(200, static_cast<int>(added.code));
   EXPECT_EQ("{\"question\":{\"qid\":1,\"text\":\"Why?\"}}\n", added.body);
@@ -197,6 +280,20 @@ TEST(AgreeDisagreeDemo, Questions) {
   const auto retrieved = HTTP(GET(url_prefix + "/test2/q?qid=1"));
   EXPECT_EQ(200, static_cast<int>(retrieved.code));
   EXPECT_EQ("{\"value0\":{\"qid\":1,\"text\":\"Why?\"}}\n", retrieved.body);
+
+  // Ensure that the question is processed as it reaches the listener stream.
+  while (listener.n != 1) {
+    ;  // Spin lock;
+  }
+
+  EXPECT_EQ(
+      "{\"record\":{\"polymorphic_id\":2147483649,\"polymorphic_name\":\"Q\",\"ptr_wrapper\":"
+      "{\"valid\":1,\"data\":{\"ms\":1001,\"qid\":1,\"text\":\"Why?\"}}"
+      "}}\n",
+      listener.data);
+
+  // TODO(dkorolev): Fix Sherlock wrt joining streams.
+  // listener_scope.Join();
 }
 
 TEST(AgreeDisagreeDemo, Users) {
