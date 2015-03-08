@@ -36,7 +36,7 @@ SOFTWARE.
 using bricks::Singleton;
 using bricks::strings::Printf;
 
-DEFINE_int32(test_port, 3000, "Local port to use for the test.");
+DEFINE_int32(test_port, 8091, "Local port to use for the test.");
 
 struct ListenOnTestPort {
   ListenOnTestPort() {

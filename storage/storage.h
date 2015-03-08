@@ -117,6 +117,10 @@ class AgreeDisagreeStorage final {
                          std::bind(&AgreeDisagreeStorage::HandleQ, this, std::placeholders::_1));
     HTTP(port_).Register("/" + client_name_ + "/u",
                          std::bind(&AgreeDisagreeStorage::HandleU, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/add_question",
+                         std::bind(&AgreeDisagreeStorage::HandleAddQ, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/add_user",
+                         std::bind(&AgreeDisagreeStorage::HandleAddU, this, std::placeholders::_1));
   }
 
   // Unregisters HTTP endpoints.
@@ -129,6 +133,12 @@ class AgreeDisagreeStorage final {
   template <typename F>
   typename sherlock::StreamInstanceImpl<std::unique_ptr<Record>>::template ListenerScope<F> Subscribe(
       F& listener) {
+    return sherlock_stream_.Subscribe(listener);
+  }
+
+  template <typename F>
+  typename sherlock::StreamInstanceImpl<std::unique_ptr<Record>>::template ListenerScope<F> Subscribe(
+      F* listener) {
     return sherlock_stream_.Subscribe(listener);
   }
 
@@ -145,27 +155,31 @@ class AgreeDisagreeStorage final {
         r(questions_[static_cast<size_t>(qid)]);
       }
     } else if (r.method == "POST") {
-      const std::string text = r.url.query["text"];
-      if (text.empty()) {
-        r("NEED TEXT\n", HTTPResponseCode.BadRequest);
-      } else if (questions_reverse_index_.count(text)) {
-        r("DUPLICATE QUESTION\n", HTTPResponseCode.BadRequest);
-      } else {
-        const QID qid = static_cast<QID>(questions_.size());
-        questions_.push_back(Question());
-        Question& new_question = questions_.back();
-        new_question.qid = qid;
-        new_question.text = text;
-        questions_reverse_index_[text] = qid;
-        AddQuestion record;
-        record.ms = r.timestamp;
-        record.qid = qid;
-        record.text = text;
-        sherlock_stream_.Publish(record);
-        r(new_question, "question");
-      }
+      HandleAddQ(std::move(r));
     } else {
       r("METHOD NOT ALLOWED\n", HTTPResponseCode.MethodNotAllowed);
+    }
+  }
+
+  void HandleAddQ(Request r) {
+    const std::string text = r.url.query["text"];
+    if (text.empty()) {
+      r("NEED TEXT\n", HTTPResponseCode.BadRequest);
+    } else if (questions_reverse_index_.count(text)) {
+      r("DUPLICATE QUESTION\n", HTTPResponseCode.BadRequest);
+    } else {
+      const QID qid = static_cast<QID>(questions_.size());
+      questions_.push_back(Question());
+      Question& new_question = questions_.back();
+      new_question.qid = qid;
+      new_question.text = text;
+      questions_reverse_index_[text] = qid;
+      AddQuestion record;
+      record.ms = r.timestamp;
+      record.qid = qid;
+      record.text = text;
+      sherlock_stream_.Publish(record);
+      r(new_question, "question");
     }
   }
 
@@ -183,16 +197,28 @@ class AgreeDisagreeStorage final {
           r("USER NOT FOUND\n", HTTPResponseCode.NotFound);
         }
       } else if (r.method == "POST") {
-        const auto cit = users_.find(uid);
-        if (cit != users_.end()) {
-          r("CANNOT READD USER\n", HTTPResponseCode.BadRequest);
-        } else {
-          User& new_user = users_[uid];
-          new_user.uid = uid;
-          r(new_user, "user");
-        }
+        HandleAddU(std::move(r));
       } else {
         r("METHOD NOT ALLOWED\n", HTTPResponseCode.MethodNotAllowed);
+      }
+    }
+  }
+  void HandleAddU(Request r) {
+    const UID uid = r.url.query["uid"];
+    if (uid.empty()) {
+      r("NEED UID\n", HTTPResponseCode.BadRequest);
+    } else {
+      const auto cit = users_.find(uid);
+      if (cit != users_.end()) {
+        r("USER ALREADY EXISTS\n", HTTPResponseCode.BadRequest);
+      } else {
+        User& new_user = users_[uid];
+        new_user.uid = uid;
+        AddUser record;
+        record.ms = r.timestamp;
+        record.uid = uid;
+        sherlock_stream_.Publish(record);
+        r(new_user, "user");
       }
     }
   }
