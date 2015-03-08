@@ -28,7 +28,7 @@ SOFTWARE.
 
 #include <string>
 
-#include "storage.h"
+#include "db.h"
 
 #include "../../Bricks/dflags/dflags.h"
 #include "../../Bricks/3party/gtest/gtest-main-with-dflags.h"
@@ -48,7 +48,7 @@ struct UnitTestStorageListener {
   std::atomic_size_t n;
   std::string data;
   UnitTestStorageListener() : n(0u) {}
-  inline bool Entry(const std::unique_ptr<storage::Record>& entry) {
+  inline bool Entry(const std::unique_ptr<db::Record>& entry) {
     data += JSON(entry, "record") + "\n";
     ++n;
     return true;
@@ -65,7 +65,7 @@ TEST(AgreeDisagreeDemo, EndpointsAndScope) {
   Singleton<ListenOnTestPort>();
   EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test1")).code));
   {
-    storage::AgreeDisagreeStorage storage(FLAGS_test_port, "test1");
+    db::AgreeDisagreeStorage db(FLAGS_test_port, "test1");
     // `/test1` is available in the scope of `AgreeDisagreeStorage("test1");`.
     EXPECT_EQ(200, static_cast<int>(HTTP(GET(url_prefix + "/test1")).code));
   }
@@ -74,10 +74,10 @@ TEST(AgreeDisagreeDemo, EndpointsAndScope) {
 }
 
 TEST(AgreeDisagreeDemo, Questions) {
-  storage::AgreeDisagreeStorage storage(FLAGS_test_port, "test2");
+  db::AgreeDisagreeStorage db(FLAGS_test_port, "test2");
 
   UnitTestStorageListener listener;
-  auto listener_scope = storage.Subscribe(listener);
+  auto listener_scope = db.Subscribe(listener);
 
   const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
   // The question with QID=1 does not exist.
@@ -111,7 +111,7 @@ TEST(AgreeDisagreeDemo, Questions) {
 }
 
 TEST(AgreeDisagreeDemo, Users) {
-  storage::AgreeDisagreeStorage storage(FLAGS_test_port, "test3");
+  db::AgreeDisagreeStorage db(FLAGS_test_port, "test3");
   const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
   // The user "adam" does not exist.
   EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test3/u?uid=adam")).code));

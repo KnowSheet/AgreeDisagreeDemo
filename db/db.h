@@ -22,8 +22,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 *******************************************************************************/
 
-#ifndef STORAGE_H
-#define STORAGE_H
+#ifndef DB_H
+#define DB_H
 
 #include "../../Bricks/port.h"
 
@@ -37,7 +37,7 @@ SOFTWARE.
 #include "../../Sherlock/sherlock.h"
 
 // Low-level storage layer and data schema for `AgreeDisagreeDemo`.
-namespace storage {
+namespace db {
 
 // Types for the storage.
 typedef std::string UID;
@@ -72,12 +72,12 @@ struct AddQuestion : Record {
   }
 };
 
-}  // namespace storage
+}  // namespace db
 
-CEREAL_REGISTER_TYPE_WITH_NAME(storage::AddUser, "U");
-CEREAL_REGISTER_TYPE_WITH_NAME(storage::AddQuestion, "Q");
+CEREAL_REGISTER_TYPE_WITH_NAME(db::AddUser, "U");
+CEREAL_REGISTER_TYPE_WITH_NAME(db::AddQuestion, "Q");
 
-namespace storage {
+namespace db {
 // The `AgreeDisagreeStorage` class, the instance of which governs
 // low-level HTTP endpoints and the Sherlock stream for this instance of `AgreeDisagreeDemo`.
 
@@ -109,7 +109,7 @@ class AgreeDisagreeStorage final {
   AgreeDisagreeStorage(int port, const std::string& client_name)
       : port_(port),
         client_name_(client_name),
-        sherlock_stream_(sherlock::Stream<std::unique_ptr<Record>>(client_name + "_storage")),
+        sherlock_stream_(sherlock::Stream<std::unique_ptr<Record>>(client_name + "_db")),
         questions_({Question()}),
         questions_reverse_index_({{"", QID::NONE}}) {
     HTTP(port_).Register("/" + client_name_, [](Request r) { r("OK\n"); });
@@ -240,6 +240,6 @@ class AgreeDisagreeStorage final {
   void operator=(AgreeDisagreeStorage&&) = delete;
 };
 
-}  // namespace storage
+}  // namespace db
 
-#endif  // STORAGE_H
+#endif  // DB_H
