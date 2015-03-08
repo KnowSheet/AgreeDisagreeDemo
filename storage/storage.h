@@ -22,38 +22,28 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 *******************************************************************************/
 
-#define BRICKS_MOCK_TIME
+#ifndef STORAGE_H
+#define STORAGE_H
 
-#include "../Bricks/port.h"
+#include "../../Bricks/port.h"
 
 #include <string>
 
-#include "../Bricks/cerealize/cerealize.h"
-#include "../Bricks/time/chrono.h"
-#include "../Bricks/util/singleton.h"
-#include "../Bricks/strings/printf.h"
-#include "../Bricks/net/api/api.h"
-#include "../Bricks/dflags/dflags.h"
-#include "../Bricks/3party/gtest/gtest-main-with-dflags.h"
+#include "../../Bricks/cerealize/cerealize.h"
+#include "../../Bricks/time/chrono.h"
+#include "../../Bricks/net/api/api.h"
+#include "../../Bricks/dflags/dflags.h"
 
-#include "../Sherlock/sherlock.h"
-
-using bricks::Singleton;
-using bricks::strings::Printf;
-
-DEFINE_int32(test_port, 3000, "Local port to use for the test.");
+#include "../../Sherlock/sherlock.h"
 
 // Low-level storage layer and data schema for `AgreeDisagreeDemo`.
-
 namespace storage {
 
 // Types for the storage.
-
 typedef std::string UID;
 enum class QID : size_t { NONE = 0 };
 
 // Types defining storage records.
-
 struct Record {
   virtual ~Record() = default;
   bricks::time::EPOCH_MILLISECONDS ms;
@@ -116,23 +106,24 @@ class AgreeDisagreeStorage final {
 
   // Registers HTTP endpoints for the provided client name.
   // Ensures that questions indexing will start from 1 by adding a dummy question with index 0.
-  explicit AgreeDisagreeStorage(const std::string& client_name)
-      : client_name_(client_name),
+  AgreeDisagreeStorage(int port, const std::string& client_name)
+      : port_(port),
+        client_name_(client_name),
         sherlock_stream_(sherlock::Stream<std::unique_ptr<Record>>(client_name + "_storage")),
         questions_({Question()}),
         questions_reverse_index_({{"", QID::NONE}}) {
-    HTTP(FLAGS_test_port).Register("/" + client_name_, [](Request r) { r("OK\n"); });
-    HTTP(FLAGS_test_port).Register("/" + client_name_ + "/q",
-                                   std::bind(&AgreeDisagreeStorage::HandleQ, this, std::placeholders::_1));
-    HTTP(FLAGS_test_port).Register("/" + client_name_ + "/u",
-                                   std::bind(&AgreeDisagreeStorage::HandleU, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_, [](Request r) { r("OK\n"); });
+    HTTP(port_).Register("/" + client_name_ + "/q",
+                         std::bind(&AgreeDisagreeStorage::HandleQ, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/u",
+                         std::bind(&AgreeDisagreeStorage::HandleU, this, std::placeholders::_1));
   }
 
   // Unregisters HTTP endpoints.
   ~AgreeDisagreeStorage() {
-    HTTP(FLAGS_test_port).UnRegister("/" + client_name_);
-    HTTP(FLAGS_test_port).UnRegister("/" + client_name_ + "/q");
-    HTTP(FLAGS_test_port).UnRegister("/" + client_name_ + "/u");
+    HTTP(port_).UnRegister("/" + client_name_);
+    HTTP(port_).UnRegister("/" + client_name_ + "/q");
+    HTTP(port_).UnRegister("/" + client_name_ + "/u");
   }
 
   template <typename F>
@@ -206,6 +197,7 @@ class AgreeDisagreeStorage final {
     }
   }
 
+  const int port_;
   const std::string client_name_;
 
   sherlock::StreamInstance<std::unique_ptr<Record>> sherlock_stream_;
@@ -224,89 +216,4 @@ class AgreeDisagreeStorage final {
 
 }  // namespace storage
 
-struct ListenOnTestPort {
-  ListenOnTestPort() {
-    HTTP(FLAGS_test_port).Register("/", [](Request r) { r("I'm listening, baby.\n"); });
-  }
-};
-
-struct UnitTestStorageListener {
-  std::atomic_size_t n;
-  std::string data;
-  UnitTestStorageListener() : n(0u) {}
-  inline bool Entry(const std::unique_ptr<storage::Record>& entry) {
-    data += JSON(entry, "record") + "\n";
-    ++n;
-    return true;
-  }
-  inline void Terminate() {
-    data += "DONE\n";
-    ++n;
-  }
-};
-
-TEST(AgreeDisagreeDemo, EndpointsAndScope) {
-  const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
-  // `/test1` is inactive. Ensure that an HTTP server is listening on the port though.
-  Singleton<ListenOnTestPort>();
-  EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test1")).code));
-  {
-    storage::AgreeDisagreeStorage storage("test1");
-    // `/test1` is available in the scope of `AgreeDisagreeStorage("test1");`.
-    EXPECT_EQ(200, static_cast<int>(HTTP(GET(url_prefix + "/test1")).code));
-  }
-  // `/test1` is inactive again as `AgreeDisagreeStorage("test1");` gets out of scope.
-  EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test1")).code));
-}
-
-TEST(AgreeDisagreeDemo, Questions) {
-  storage::AgreeDisagreeStorage storage("test2");
-
-  UnitTestStorageListener listener;
-  auto listener_scope = storage.Subscribe(listener);
-
-  const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
-  // The question with QID=1 does not exist.
-  EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test2/q?qid=1")).code));
-  // A question can be added and gets a QID of 1.
-  EXPECT_EQ(0u, listener.n);
-  bricks::time::SetNow(bricks::time::EPOCH_MILLISECONDS(1001));
-  const auto added = HTTP(POST(url_prefix + "/test2/q?text=Why%3F"));
-  EXPECT_EQ(200, static_cast<int>(added.code));
-  EXPECT_EQ("{\"question\":{\"qid\":1,\"text\":\"Why?\"}}\n", added.body);
-  // A new question with the same text can not be added.
-  EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test2/q?text=Why%3F")).code));
-  // A question with QID of 1 can be retrieved now.
-  const auto retrieved = HTTP(GET(url_prefix + "/test2/q?qid=1"));
-  EXPECT_EQ(200, static_cast<int>(retrieved.code));
-  EXPECT_EQ("{\"value0\":{\"qid\":1,\"text\":\"Why?\"}}\n", retrieved.body);
-
-  // Ensure that the question is processed as it reaches the listener stream.
-  while (listener.n != 1) {
-    ;  // Spin lock;
-  }
-
-  EXPECT_EQ(
-      "{\"record\":{\"polymorphic_id\":2147483649,\"polymorphic_name\":\"Q\",\"ptr_wrapper\":"
-      "{\"valid\":1,\"data\":{\"ms\":1001,\"qid\":1,\"text\":\"Why?\"}}"
-      "}}\n",
-      listener.data);
-
-  // TODO(dkorolev): Fix Sherlock wrt joining streams.
-  // listener_scope.Join();
-}
-
-TEST(AgreeDisagreeDemo, Users) {
-  storage::AgreeDisagreeStorage storage("test3");
-  const std::string url_prefix = Printf("http://localhost:%d", FLAGS_test_port);
-  // The user "adam" does not exist.
-  EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test3/u?uid=adam")).code));
-  // The user "adam" can be added.
-  const auto added = HTTP(POST(url_prefix + "/test3/u?uid=adam"));
-  EXPECT_EQ(200, static_cast<int>(added.code));
-  EXPECT_EQ("{\"user\":{\"uid\":\"adam\",\"answers\":[]}}\n", added.body);
-  // The user "adam" cannot be re-added.
-  EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test3/u?uid=adam")).code));
-  // The user "adam" exists now.
-  EXPECT_EQ(200, static_cast<int>(HTTP(GET(url_prefix + "/test3/u?uid=adam")).code));
-}
+#endif  // STORAGE_H
