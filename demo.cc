@@ -38,14 +38,26 @@ DEFINE_int32(port, 3000, "Local port to use.");
 using bricks::FileSystem;
 using bricks::strings::Printf;
 using bricks::time::Now;
+using bricks::time::EPOCH_MILLISECONDS;
 using bricks::time::MILLISECONDS_INTERVAL;
 
+template <typename Y>
+struct VizPoint {
+  double x;
+  Y y;
+  template <typename A>
+  void serialize(A& ar) {
+    ar(CEREAL_NVP(x), CEREAL_NVP(y));
+  }
+};
+
+template <typename E>
 class ServeRawPubSubOverHTTP {
  public:
   ServeRawPubSubOverHTTP(Request r)
       : http_request_scope_(std::move(r)), http_response_(http_request_scope_.SendChunkedResponse()) {}
 
-  inline bool Entry(const std::unique_ptr<db::Record>& entry) {
+  inline bool Entry(const E& entry) {
     try {
       http_response_(entry, "record");
       return true;
@@ -81,10 +93,13 @@ class Cruncher {
     std::map<db::QID, std::map<db::UID, db::ANSWER>> answers;
   };
 
+  Cruncher(int port, const std::string& name)
+      : port_(port), name_(name), methronome_thread_(&Cruncher::Methronome, this) {}
+
+  ~Cruncher() { methronome_thread_.join(); }
+
   // TODO(dkorolev): Move this to a message queue.
   Box GetBox() const { return box_; }
-
-  Cruncher(const std::string& name) : name_(name) {}
 
   inline bool Entry(const std::unique_ptr<db::Record>& entry) {
     types::dispatcher::DispatchCall(*entry, *this);
@@ -111,8 +126,32 @@ class Cruncher {
 
   inline void Terminate() { std::cerr << '@' << name_ << " is done.\n"; }
 
+  // TODO(dkorolev): Perhaps move the methronome into Bricks, and make it use a lambda?
+  void Methronome() {
+    // Update real-time plots every second.
+    const MILLISECONDS_INTERVAL period = static_cast<MILLISECONDS_INTERVAL>(1000);
+
+    auto q_total = sherlock::Stream<VizPoint<int>>(name_ + "_q_total");
+
+    HTTP(port_).Register("/" + name_ + "/d/q_total/data", [&q_total](Request r) {
+      q_total.Subscribe(new ServeRawPubSubOverHTTP<VizPoint<int>>(std::move(r))).Detach();
+    });
+
+    // Keep pushing data into the
+    EPOCH_MILLISECONDS now = Now();
+    while (true) {
+      std::cerr << "HA\n";
+      // TODO(dkorolev): This call should go via an MQ.
+      q_total.Publish(VizPoint<int>{static_cast<double>(now), static_cast<int>(box_.questions.size())});
+      bricks::time::SleepUntil(now + period);
+      now = Now();
+    }
+  }
+
  private:
+  const int port_;
   const std::string& name_;
+  std::thread methronome_thread_;
   Box box_;
 
   Cruncher() = delete;
@@ -128,7 +167,7 @@ struct Controller {
       : port_(port),
         name_(name),
         db_(db),
-        cruncher_(name_),
+        cruncher_(port_, name_),
         cruncher_subscription_scope_(db_->Subscribe(cruncher_)),
         controller_boilerplate_html_(
             FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "controls.html"))) {
@@ -138,7 +177,7 @@ struct Controller {
 
     // Raw PubSub as JSON.
     HTTP(port_).Register("/" + name_ + "/raw", [this](Request r) {
-      db_->Subscribe(new ServeRawPubSubOverHTTP(std::move(r))).Detach();
+      db_->Subscribe(new ServeRawPubSubOverHTTP<std::unique_ptr<db::Record>>(std::move(r))).Detach();
     });
 
     // Pre-populate a few users, questions and answers.
