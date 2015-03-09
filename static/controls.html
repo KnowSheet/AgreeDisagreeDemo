@@ -7,13 +7,14 @@
   a:active { color: blue; }
 </style>
 
-<p style='font-size:36px;text-align:center'><a href='users'>Users</a>: <b>0</b></p>
+<table border=1 align=center cellpadding=5>
+%s
+</table>
+
 <form style='text-align:center' action='add_user' method='GET'>
   <input type='text' style='font-size:36px;text-align:center' name='uid' autocomplete='off' value='jack'><br>
   <input type='submit' value='Add User' style='font-size:36px;text-align:center'>
 </form>
-
-<p style='font-size:36px;text-align:center'><a href='questions'>Questions</a>: <b>0</b></p>
 
 <form style='text-align:center' action='add_question' method='GET'>
   <input type='text' style='font-size:36px;text-align:center' name='text' autocomplete='off' value="Ain't it cool?"><br>
@@ -22,8 +23,4 @@
 
 <br>
 
-<p style='font-size:36px;text-align:center'><a href='answers'>Answers</a>: <b>0</b></p>
-
-<p style='font-size:24;text-align:center'><a href='raw'>Raw JSON PubSub URL for CURL.</a></p>
-
-<p style='font-size:24px;text-align:center'>KnowSheet v1.0, March 2015.</p>
+<p style='font-size:24;text-align:center'><a href='raw'>Raw JSON PubSub URL</a>, for <pre>curl</pre>.</p>

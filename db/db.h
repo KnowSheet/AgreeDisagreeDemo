@@ -42,6 +42,7 @@ namespace db {
 // Types for the storage.
 typedef std::string UID;
 enum class QID : size_t { NONE = 0 };
+enum class ANSWER : int { NO = -1, NA = 0, YES = +1 };
 
 // Types defining storage records.
 struct Record {
@@ -69,6 +70,17 @@ struct AddQuestion : Record {
   void serialize(A& ar) {
     Record::serialize(ar);
     ar(CEREAL_NVP(qid), CEREAL_NVP(text));
+  }
+};
+
+struct AddAnswer : Record {
+  UID uid;
+  QID qid;
+  ANSWER answer;
+  template <typename A>
+  void serialize(A& ar) {
+    Record::serialize(ar);
+    ar(CEREAL_NVP(uid), CEREAL_NVP(qid), CEREAL_NVP(answer));
   }
 };
 

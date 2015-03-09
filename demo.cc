@@ -29,6 +29,7 @@ SOFTWARE.
 #include "../Bricks/file/file.h"
 #include "../Bricks/strings/util.h"
 #include "../Bricks/time/chrono.h"
+#include "../Bricks/rtti/dispatcher.h"
 #include "../Bricks/net/api/api.h"
 #include "../Bricks/dflags/dflags.h"
 
@@ -67,17 +68,49 @@ class ServeRawPubSubOverHTTP {
 
 class Cruncher {
  public:
+  struct types {
+    typedef db::Record base;
+    typedef std::tuple<db::AddAnswer, db::AddQuestion, db::AddUser> derived_list;
+    typedef bricks::rtti::RuntimeTupleDispatcher<base, derived_list> dispatcher;
+  };
+
+  struct Box {
+    std::vector<std::string> users;
+    std::vector<std::string> questions;
+  };
+
+  // TODO(dkorolev): Move this to a message queue.
+  Box GetBox() const { return box_; }
+
   Cruncher(const std::string& name) : name_(name) {}
 
   inline bool Entry(const std::unique_ptr<db::Record>& entry) {
-    std::cerr << '@' << name_ << " : " << JSON(entry, "record") << '\n';
+    types::dispatcher::DispatchCall(*entry, *this);
     return true;
+  }
+
+  inline void operator()(db::Record&) { throw std::logic_error("Should not happen."); }
+
+  inline void operator()(db::AddUser& u) {
+    std::cerr << '@' << name_ << " +U: " << u.uid << '\n';
+    box_.users.push_back(u.uid);
+  }
+
+  inline void operator()(db::AddQuestion& q) {
+    std::cerr << '@' << name_ << " +Q" << static_cast<size_t>(q.qid) << " : \"" << q.text << "\"\n";
+    box_.questions.push_back(q.text);
+  }
+
+  inline void operator()(db::AddAnswer& a) {
+    std::cerr << '@' << name_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
+              << static_cast<size_t>(a.qid) << '\n';
   }
 
   inline void Terminate() { std::cerr << '@' << name_ << " is done.\n"; }
 
  private:
   const std::string& name_;
+  Box box_;
 
   Cruncher() = delete;
   Cruncher(const Cruncher&) = delete;
@@ -95,7 +128,7 @@ struct Controller {
         cruncher_(name_),
         cruncher_subscription_scope_(db_->Subscribe(cruncher_)),
         controller_boilerplate_html_(
-            FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "controller_example.html"))) {
+            FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "controls.html"))) {
     // The main controller page.
     HTTP(port_)
         .Register("/" + name_ + "/actions", std::bind(&Controller::Actions, this, std::placeholders::_1));
@@ -103,9 +136,27 @@ struct Controller {
     HTTP(port_).Register("/" + name_ + "/raw", [this](Request r) {
       db_->Subscribe(new ServeRawPubSubOverHTTP(std::move(r))).Detach();
     });
+    // TODO(dkorolev): Pre-populate users, questions and answers.
   }
 
-  void Actions(Request r) { r(Printf(controller_boilerplate_html_.c_str()), HTTPResponseCode.OK, "text/html"); }
+  void Actions(Request r) {
+    std::ostringstream table;
+    Cruncher::Box box = cruncher_.GetBox();
+    table << "<tr><td></td>";
+    for (const auto& u : box.users) {
+      table << "<td align=center><b>" << u << "</b></td>";
+    }
+    table << "<tr>\n";
+    for (const auto& q : box.questions) {
+      table << "<tr><td align=right><b>" << q << "</b></td>";
+      for (const auto& u : box.users) {
+        static_cast<void>(u);
+        table << "<td>foo</td>";
+      }
+      table << "</tr>\n";
+    }
+    r(Printf(controller_boilerplate_html_.c_str(), table.str().c_str()), HTTPResponseCode.OK, "text/html");
+  }
 
  private:
   const int port_;
