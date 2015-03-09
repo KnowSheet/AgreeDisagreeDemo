@@ -38,6 +38,7 @@ DEFINE_int32(port, 3000, "Local port to use.");
 using bricks::FileSystem;
 using bricks::strings::Printf;
 using bricks::time::Now;
+using bricks::time::MILLISECONDS_INTERVAL;
 
 class ServeRawPubSubOverHTTP {
  public:
@@ -46,7 +47,7 @@ class ServeRawPubSubOverHTTP {
 
   inline bool Entry(const std::unique_ptr<db::Record>& entry) {
     try {
-      http_response_(JSON(entry, "record") + "\n");  // WTF do I need to say `JSON` here? -- D.K.
+      http_response_(entry, "record");
       return true;
     } catch (const bricks::net::NetworkException&) {
       return false;
@@ -70,13 +71,14 @@ class Cruncher {
  public:
   struct types {
     typedef db::Record base;
-    typedef std::tuple<db::AddAnswer, db::AddQuestion, db::AddUser> derived_list;
+    typedef std::tuple<db::AnswerRecord, db::QuestionRecord, db::UserRecord> derived_list;
     typedef bricks::rtti::RuntimeTupleDispatcher<base, derived_list> dispatcher;
   };
 
   struct Box {
     std::vector<std::string> users;
     std::vector<std::string> questions;
+    std::map<db::QID, std::map<db::UID, db::ANSWER>> answers;
   };
 
   // TODO(dkorolev): Move this to a message queue.
@@ -91,19 +93,20 @@ class Cruncher {
 
   inline void operator()(db::Record&) { throw std::logic_error("Should not happen."); }
 
-  inline void operator()(db::AddUser& u) {
+  inline void operator()(db::UserRecord& u) {
     std::cerr << '@' << name_ << " +U: " << u.uid << '\n';
     box_.users.push_back(u.uid);
   }
 
-  inline void operator()(db::AddQuestion& q) {
+  inline void operator()(db::QuestionRecord& q) {
     std::cerr << '@' << name_ << " +Q" << static_cast<size_t>(q.qid) << " : \"" << q.text << "\"\n";
     box_.questions.push_back(q.text);
   }
 
-  inline void operator()(db::AddAnswer& a) {
+  inline void operator()(db::AnswerRecord& a) {
     std::cerr << '@' << name_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
               << static_cast<size_t>(a.qid) << '\n';
+    box_.answers[a.qid][a.uid] = a.answer;
   }
 
   inline void Terminate() { std::cerr << '@' << name_ << " is done.\n"; }
@@ -132,11 +135,33 @@ struct Controller {
     // The main controller page.
     HTTP(port_)
         .Register("/" + name_ + "/actions", std::bind(&Controller::Actions, this, std::placeholders::_1));
+
     // Raw PubSub as JSON.
     HTTP(port_).Register("/" + name_ + "/raw", [this](Request r) {
       db_->Subscribe(new ServeRawPubSubOverHTTP(std::move(r))).Detach();
     });
-    // TODO(dkorolev): Pre-populate users, questions and answers.
+
+    // Pre-populate a few users, questions and answers.
+    db->DoAddUser("dima", Now() - MILLISECONDS_INTERVAL(5000));
+    db->DoAddUser("alice", Now() - MILLISECONDS_INTERVAL(4000));
+    db->DoAddUser("bob", Now() - MILLISECONDS_INTERVAL(3000));
+    db->DoAddUser("charles", Now() - MILLISECONDS_INTERVAL(2000));
+    const auto vi = db->DoAddQuestion("Vi is the best text editor.", Now() - MILLISECONDS_INTERVAL(4500)).qid;
+    const auto weed = db->DoAddQuestion("Marijuana should be legal.", Now() - MILLISECONDS_INTERVAL(3500)).qid;
+    const auto bubble = db->DoAddQuestion("We are in the bubble.", Now() - MILLISECONDS_INTERVAL(2500)).qid;
+    const auto movies = db->DoAddQuestion("Movies are getting worse.", Now() - MILLISECONDS_INTERVAL(1500)).qid;
+    db->DoAddAnswer("dima", vi, db::ANSWER::YES, Now());
+    db->DoAddAnswer("dima", weed, db::ANSWER::YES, Now());
+    db->DoAddAnswer("dima", bubble, db::ANSWER::NO, Now());
+    db->DoAddAnswer("dima", movies, db::ANSWER::YES, Now());
+    db->DoAddAnswer("alice", vi, db::ANSWER::NO, Now());
+    db->DoAddAnswer("alice", weed, db::ANSWER::NO, Now());
+    db->DoAddAnswer("bob", movies, db::ANSWER::NO, Now());
+    db->DoAddAnswer("bob", bubble, db::ANSWER::YES, Now());
+    db->DoAddAnswer("charles", vi, db::ANSWER::NO, Now());
+    db->DoAddAnswer("charles", weed, db::ANSWER::NO, Now());
+    db->DoAddAnswer("charles", bubble, db::ANSWER::YES, Now());
+    db->DoAddAnswer("charles", movies, db::ANSWER::NO, Now());
   }
 
   void Actions(Request r) {
@@ -147,11 +172,35 @@ struct Controller {
       table << "<td align=center><b>" << u << "</b></td>";
     }
     table << "<tr>\n";
-    for (const auto& q : box.questions) {
+    for (size_t qi = 0; qi < box.questions.size(); ++qi) {
+      const auto& q = box.questions[qi];
       table << "<tr><td align=right><b>" << q << "</b></td>";
+      std::map<db::UID, db::ANSWER>& current_answers = box.answers[static_cast<db::QID>(qi + 1)];
       for (const auto& u : box.users) {
-        static_cast<void>(u);
-        table << "<td>foo</td>";
+        table << "<td align=center>";
+        struct ValueTextColor {
+          int value;
+          const char* text;
+          const char* color;
+        };
+        static constexpr ValueTextColor options[3] = {
+            {-1, "No", "red"}, {0, "N/A", "gray"}, {+1, "Yes", "green"}};
+        const int current_answer = static_cast<int>(current_answers[u]);
+        for (size_t i = 0; i < 3; ++i) {
+          if (i) {
+            table << " | ";
+          }
+          if (options[i].value != current_answer) {
+            table << Printf("<a href='add_answer?uid=%s&qid=%d&answer=%d'>%s</a>",
+                            u.c_str(),
+                            static_cast<int>(qi + 1),
+                            options[i].value,
+                            options[i].text);
+          } else {
+            table << Printf("<b><font color=%s>%s</font></b>", options[i].color, options[i].text);
+          }
+        }
+        table << "</td>";
       }
       table << "</tr>\n";
     }

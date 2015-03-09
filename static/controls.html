@@ -11,16 +11,34 @@
 %s
 </table>
 
-<form style='text-align:center' action='add_user' method='GET'>
-  <input type='text' style='font-size:36px;text-align:center' name='uid' autocomplete='off' value='jack'><br>
-  <input type='submit' value='Add User' style='font-size:36px;text-align:center'>
-</form>
+<br>
 
-<form style='text-align:center' action='add_question' method='GET'>
-  <input type='text' style='font-size:36px;text-align:center' name='text' autocomplete='off' value="Ain't it cool?"><br>
-  <input type='submit' value='Add Question' style='font-size:36px;text-align:center'>
-</form>
+<table border=0 align=center>
+
+<tr>
+  <form style='text-align:center' action='add_user' method='GET'>
+    <td>
+      <input type='text' style='font-size:36;text-align:center' name='uid' autocomplete='off' value='jack'><br>
+    </td>
+    <td>
+      <input type='submit' value='Add User' style='font-size:36;text-align:center'>
+    </td>
+  </form>
+</tr>
+
+<tr>
+  <form style='text-align:center' action='add_question' method='GET'>
+    <td>
+      <input type='text' style='font-size:36;text-align:center' name='text' autocomplete='off' value="Ain't it cool?"><br>
+    </td>
+    <td>
+      <input type='submit' value='Add Question' style='font-size:36;text-align:center'>
+    </td>
+  </form>
+</tr>
+
+</table>
 
 <br>
 
-<p style='font-size:24;text-align:center'><a href='raw'>Raw JSON PubSub URL</a>, for <pre>curl</pre>.</p>
+<p style='font-size:24;text-align:center'><a href='raw'>PubSub JSON Feed</a> (curl-recommended)</p>

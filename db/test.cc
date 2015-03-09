@@ -87,13 +87,13 @@ TEST(AgreeDisagreeDemo, Questions) {
   bricks::time::SetNow(bricks::time::EPOCH_MILLISECONDS(1001));
   const auto added = HTTP(POST(url_prefix + "/test2/q?text=Why%3F"));
   EXPECT_EQ(200, static_cast<int>(added.code));
-  EXPECT_EQ("{\"question\":{\"qid\":1,\"text\":\"Why?\"}}\n", added.body);
+  EXPECT_EQ("{\"question\":{\"ms\":1001,\"qid\":1,\"text\":\"Why?\"}}\n", added.body);
   // A new question with the same text can not be added.
   EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test2/q?text=Why%3F")).code));
   // A question with QID of 1 can be retrieved now.
   const auto retrieved = HTTP(GET(url_prefix + "/test2/q?qid=1"));
   EXPECT_EQ(200, static_cast<int>(retrieved.code));
-  EXPECT_EQ("{\"value0\":{\"qid\":1,\"text\":\"Why?\"}}\n", retrieved.body);
+  EXPECT_EQ("{\"value0\":{\"ms\":1001,\"qid\":1,\"text\":\"Why?\"}}\n", retrieved.body);
 
   // Ensure that the question is processed as it reaches the listener stream.
   while (listener.n != 1) {
@@ -118,7 +118,7 @@ TEST(AgreeDisagreeDemo, Users) {
   // The user "adam" can be added.
   const auto added = HTTP(POST(url_prefix + "/test3/u?uid=adam"));
   EXPECT_EQ(200, static_cast<int>(added.code));
-  EXPECT_EQ("{\"user\":{\"uid\":\"adam\",\"answers\":[]}}\n", added.body);
+  EXPECT_EQ("{\"user\":{\"ms\":1001,\"uid\":\"adam\"}}\n", added.body);
   // The user "adam" cannot be re-added.
   EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test3/u?uid=adam")).code));
   // The user "adam" exists now.
