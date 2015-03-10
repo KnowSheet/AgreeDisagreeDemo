@@ -25,123 +25,78 @@ SOFTWARE.
 #ifndef DB_H
 #define DB_H
 
-#include "../../Bricks/port.h"
+#include "../Bricks/port.h"
 
 #include <string>
 
-#include "../../Bricks/cerealize/cerealize.h"
-#include "../../Bricks/time/chrono.h"
-#include "../../Bricks/net/api/api.h"
-#include "../../Bricks/dflags/dflags.h"
+#include "schema.h"
 
-#include "../../Sherlock/sherlock.h"
+#include "../Bricks/cerealize/cerealize.h"
+#include "../Bricks/time/chrono.h"
+#include "../Bricks/net/api/api.h"
+#include "../Bricks/dflags/dflags.h"
 
-// Low-level storage layer and data schema for `AgreeDisagreeDemo`.
-namespace db {
-
-// Types for the storage.
-typedef std::string UID;
-enum class QID : size_t { NONE = 0 };
-enum class ANSWER : int { NO = -1, NA = 0, YES = +1 };
-
-// Schema for storage records and low-level API calls.
-struct Record {
-  virtual ~Record() = default;
-  bricks::time::EPOCH_MILLISECONDS ms;
-  template <typename A>
-  void serialize(A& ar) {
-    ar(CEREAL_NVP(ms));
-  }
-};
-
-struct UserRecord : Record {
-  UID uid;
-  template <typename A>
-  void serialize(A& ar) {
-    Record::serialize(ar);
-    ar(CEREAL_NVP(uid));
-  }
-};
-
-struct QuestionRecord : Record {
-  QID qid;
-  std::string text;
-  template <typename A>
-  void serialize(A& ar) {
-    Record::serialize(ar);
-    ar(CEREAL_NVP(qid), CEREAL_NVP(text));
-  }
-};
-
-// TODO(dkorolev): Perhaps add a unit test for this one.
-struct AnswerRecord : Record {
-  UID uid;
-  QID qid;
-  ANSWER answer;
-  template <typename A>
-  void serialize(A& ar) {
-    Record::serialize(ar);
-    ar(CEREAL_NVP(uid), CEREAL_NVP(qid), CEREAL_NVP(answer));
-  }
-};
-
-}  // namespace db
-
-CEREAL_REGISTER_TYPE_WITH_NAME(db::UserRecord, "U");
-CEREAL_REGISTER_TYPE_WITH_NAME(db::QuestionRecord, "Q");
-CEREAL_REGISTER_TYPE_WITH_NAME(db::AnswerRecord, "A");
+#include "../Sherlock/sherlock.h"
 
 namespace db {
-// The `AgreeDisagreeStorage` class, the instance of which governs
-// low-level HTTP endpoints and the Sherlock stream for this instance of `AgreeDisagreeDemo`.
 
-class AgreeDisagreeStorage final {
+// The instance of the `Storage` class governs low-level API HTTP endpoints
+// and the Sherlock stream for the instance of the user-facing demo.
+//
+// One instance of `Storage` exists per one instance of the user-facing demo endpoint.
+
+class Storage final {
  public:
   // Registers HTTP endpoints for the provided client name.
   // Ensures that questions indexing will start from 1 by adding a dummy question with index 0.
-  AgreeDisagreeStorage(int port, const std::string& client_name)
+  Storage(int port, const std::string& client_name)
       : port_(port),
         client_name_(client_name),
-        sherlock_stream_(sherlock::Stream<std::unique_ptr<Record>>(client_name + "_db")),
-        questions_({QuestionRecord()}),
+        sherlock_stream_(sherlock::Stream<std::unique_ptr<schema::Base>>(client_name + "_db", "record")),
+        questions_({schema::QuestionRecord()}),
         questions_reverse_index_({""}) {
     HTTP(port_).Register("/" + client_name_, [](Request r) { r("OK\n"); });
-    HTTP(port_).Register("/" + client_name_ + "/q",
-                         std::bind(&AgreeDisagreeStorage::HandleQ, this, std::placeholders::_1));
-    HTTP(port_).Register("/" + client_name_ + "/u",
-                         std::bind(&AgreeDisagreeStorage::HandleU, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/q", std::bind(&Storage::HandleQ, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/u", std::bind(&Storage::HandleU, this, std::placeholders::_1));
     // TODO(dkorolev): POST "/a"?
-    HTTP(port_).Register("/" + client_name_ + "/add_question",
-                         std::bind(&AgreeDisagreeStorage::HandleAddQ, this, std::placeholders::_1));
-    HTTP(port_).Register("/" + client_name_ + "/add_user",
-                         std::bind(&AgreeDisagreeStorage::HandleAddU, this, std::placeholders::_1));
-    HTTP(port_).Register("/" + client_name_ + "/add_answer",
-                         std::bind(&AgreeDisagreeStorage::HandleAddA, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/a/add_question",
+                         std::bind(&Storage::HandleAddQ, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/a/add_user",
+                         std::bind(&Storage::HandleAddU, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/a/add_answer",
+                         std::bind(&Storage::HandleAddA, this, std::placeholders::_1));
   }
 
   // Unregisters HTTP endpoints.
-  ~AgreeDisagreeStorage() {
+  ~Storage() {
     HTTP(port_).UnRegister("/" + client_name_);
     HTTP(port_).UnRegister("/" + client_name_ + "/q");
     HTTP(port_).UnRegister("/" + client_name_ + "/u");
+    HTTP(port_).UnRegister("/" + client_name_ + "/a/add_question");
+    HTTP(port_).UnRegister("/" + client_name_ + "/a/add_user");
+    HTTP(port_).UnRegister("/" + client_name_ + "/a/add_answer");
   }
 
+  // Sherlock stream access.
   template <typename F>
-  typename sherlock::StreamInstanceImpl<std::unique_ptr<Record>>::template ListenerScope<F> Subscribe(
+  typename sherlock::StreamInstanceImpl<std::unique_ptr<schema::Base>>::template ListenerScope<F> Subscribe(
       F& listener) {
     return sherlock_stream_.Subscribe(listener);
   }
 
   template <typename F>
-  typename sherlock::StreamInstanceImpl<std::unique_ptr<Record>>::template ListenerScope<F> Subscribe(
-      F* listener) {
-    return sherlock_stream_.Subscribe(listener);
+  typename sherlock::StreamInstanceImpl<std::unique_ptr<schema::Base>>::template ListenerScope<F> Subscribe(
+      std::unique_ptr<F> listener) {
+    return sherlock_stream_.Subscribe(std::move(listener));
   }
 
-  const QuestionRecord& DoAddQuestion(const std::string& text, bricks::time::EPOCH_MILLISECONDS timestamp) {
-    const QID qid = static_cast<QID>(questions_.size());
-    questions_.push_back(QuestionRecord());
-    QuestionRecord& record = questions_.back();
+  // API implementation.
+  // Bloated a bit for easier demonstration. -- D.K.
+  const schema::QuestionRecord& DoAddQuestion(const std::string& text,
+                                              bricks::time::EPOCH_MILLISECONDS timestamp) {
+    const schema::QID qid = static_cast<schema::QID>(questions_.size());
+    questions_.push_back(schema::QuestionRecord());
+    schema::QuestionRecord& record = questions_.back();
     record.ms = timestamp;
     record.qid = qid;
     record.text = text;
@@ -150,16 +105,19 @@ class AgreeDisagreeStorage final {
     return record;
   }
 
-  const UserRecord& DoAddUser(const UID& uid, bricks::time::EPOCH_MILLISECONDS timestamp) {
-    UserRecord& record = users_[uid];
+  const schema::UserRecord& DoAddUser(const schema::UID& uid, bricks::time::EPOCH_MILLISECONDS timestamp) {
+    schema::UserRecord& record = users_[uid];
     record.ms = timestamp;
     record.uid = uid;
     sherlock_stream_.Publish(record);
     return record;
   }
 
-  AnswerRecord DoAddAnswer(const UID& uid, QID qid, ANSWER answer, bricks::time::EPOCH_MILLISECONDS timestamp) {
-    AnswerRecord record;
+  schema::AnswerRecord DoAddAnswer(const schema::UID& uid,
+                                   schema::QID qid,
+                                   schema::ANSWER answer,
+                                   bricks::time::EPOCH_MILLISECONDS timestamp) {
+    schema::AnswerRecord record;
     record.ms = timestamp;
     record.uid = uid;
     record.qid = qid;
@@ -168,12 +126,14 @@ class AgreeDisagreeStorage final {
     return record;
   }
 
+  void operator()(Request r) { sherlock_stream_(std::move(r)); }  //.ServeDataViaHTTP(std::move(r)); }
+
  private:
   // Retrieves or creates questions.
   void HandleQ(Request r) {
     if (r.method == "GET") {
-      const QID qid = static_cast<QID>(atoi(r.url.query["qid"].c_str()));
-      if (qid == QID::NONE) {
+      const schema::QID qid = static_cast<schema::QID>(atoi(r.url.query["qid"].c_str()));
+      if (qid == schema::QID::NONE) {
         r("NEED QID\n", HTTPResponseCode.BadRequest);
       } else if (static_cast<size_t>(qid) >= questions_.size()) {
         r("QUESTION NOT FOUND\n", HTTPResponseCode.NotFound);
@@ -194,13 +154,13 @@ class AgreeDisagreeStorage final {
     } else if (questions_reverse_index_.count(text)) {
       r("DUPLICATE QUESTION\n", HTTPResponseCode.BadRequest);
     } else {
-      r(DoAddQuestion(text, r.timestamp), "question");
+      RespondWith(std::move(r), DoAddQuestion(text, r.timestamp), "question");
     }
   }
 
   // Retrieves or creates users. Factored out to allow GET-s as well, for simpler "Web" UX.
   void HandleU(Request r) {
-    const UID uid = r.url.query["uid"];
+    const schema::UID uid = r.url.query["uid"];
     if (uid.empty()) {
       r("NEED UID\n", HTTPResponseCode.BadRequest);
     } else {
@@ -219,52 +179,69 @@ class AgreeDisagreeStorage final {
     }
   }
   void HandleAddU(Request r) {
-    const UID uid = r.url.query["uid"];
+    const schema::UID uid = r.url.query["uid"];
     if (uid.empty()) {
       r("NEED UID\n", HTTPResponseCode.BadRequest);
     } else {
       if (users_.count(uid)) {
         r("USER ALREADY EXISTS\n", HTTPResponseCode.BadRequest);
       } else {
-        r(DoAddUser(uid, r.timestamp), "user");
+        RespondWith(std::move(r), DoAddUser(uid, r.timestamp), "user");
       }
     }
   }
 
   // TODO(dkorolev): HandleA()?
   void HandleAddA(Request r) {
-    const UID uid = r.url.query["uid"];
-    const QID qid = static_cast<QID>(atoi(r.url.query["qid"].c_str()));
+    const schema::UID uid = r.url.query["uid"];
+    const schema::QID qid = static_cast<schema::QID>(atoi(r.url.query["qid"].c_str()));
     const int answer_as_int = static_cast<int>(atoi(r.url.query["answer"].c_str()));
-    const ANSWER answer = static_cast<ANSWER>([](int x) { return x ? (x > 0 ? +1 : -1) : 0; }(answer_as_int));
+    const schema::ANSWER answer =
+        static_cast<schema::ANSWER>([](int x) { return x ? (x > 0 ? +1 : -1) : 0; }(answer_as_int));
     if (uid.empty()) {
       r("NEED UID\n", HTTPResponseCode.BadRequest);
     } else if (!users_.count(uid)) {
       r("USER DOES NOT EXISTS\n", HTTPResponseCode.BadRequest);
-    } else if (qid == QID::NONE) {
+    } else if (qid == schema::QID::NONE) {
       r("NEED QID\n", HTTPResponseCode.BadRequest);
     } else if (static_cast<size_t>(qid) >= questions_.size()) {
       r("QUESTION DOES NOT EXISTS\n", HTTPResponseCode.BadRequest);
     } else {
-      r(DoAddAnswer(uid, qid, answer, r.timestamp), "answer");
+      RespondWith(std::move(r), DoAddAnswer(uid, qid, answer, r.timestamp), "answer");
+    }
+  }
+
+  template <typename T>
+  static void RespondWith(Request r, T&& json, const char* json_title) {
+    if (r.method == "POST") {
+      r(json, json_title);
+    } else {
+      const std::string html =
+          "<!doctype html>\n"
+          "<head><meta http-equiv='refresh' content='3;URL=.'></head>\n"
+          "<table border=1><tr><td><pre>" +
+          JSON(json, json_title) +
+          "</pre></td></tr></table>\n"
+          "<br>You will be taken back in a blast.<br>";
+      r(html, HTTPResponseCode.OK, "text/html");
     }
   }
 
   const int port_;
   const std::string client_name_;
 
-  sherlock::StreamInstance<std::unique_ptr<Record>> sherlock_stream_;
+  sherlock::StreamInstance<std::unique_ptr<schema::Base>> sherlock_stream_;
 
-  std::vector<QuestionRecord> questions_;
+  std::vector<schema::QuestionRecord> questions_;
   std::set<std::string> questions_reverse_index_;  // To disallow duplicate questions.
 
-  std::map<UID, UserRecord> users_;
+  std::map<schema::UID, schema::UserRecord> users_;
 
-  AgreeDisagreeStorage() = delete;
-  AgreeDisagreeStorage(const AgreeDisagreeStorage&) = delete;
-  AgreeDisagreeStorage(AgreeDisagreeStorage&&) = delete;
-  void operator=(const AgreeDisagreeStorage&) = delete;
-  void operator=(AgreeDisagreeStorage&&) = delete;
+  Storage() = delete;
+  Storage(const Storage&) = delete;
+  Storage(Storage&&) = delete;
+  void operator=(const Storage&) = delete;
+  void operator=(Storage&&) = delete;
 };
 
 }  // namespace db

@@ -24,13 +24,21 @@ SOFTWARE.
 
 #include "../Bricks/port.h"
 
-#include "db/db.h"
+#include "schema.h"
+#include "db.h"
+#include "dashboard.h"
+
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::Record, "0");
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::UserRecord, "U");
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::QuestionRecord, "Q");
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 
 #include "../Bricks/file/file.h"
 #include "../Bricks/strings/util.h"
 #include "../Bricks/time/chrono.h"
 #include "../Bricks/rtti/dispatcher.h"
 #include "../Bricks/net/api/api.h"
+#include "../Bricks/mq/inmemory/mq.h"
 #include "../Bricks/dflags/dflags.h"
 
 DEFINE_int32(port, 3000, "Local port to use.");
@@ -51,108 +59,208 @@ struct VizPoint {
   }
 };
 
-template <typename E>
-class ServeRawPubSubOverHTTP {
- public:
-  ServeRawPubSubOverHTTP(Request r)
-      : http_request_scope_(std::move(r)), http_response_(http_request_scope_.SendChunkedResponse()) {}
-
-  inline bool Entry(const E& entry) {
-    try {
-      http_response_(entry, "record");
-      return true;
-    } catch (const bricks::net::NetworkException&) {
-      return false;
-    }
-  }
-
-  inline void Terminate() { http_response_("{\"error\":\"Done.\"}\n"); }
-
- private:
-  Request http_request_scope_;  // Need to keep `Request` in scope, for the lifetime of the chunked response.
-  bricks::net::HTTPServerConnection::ChunkedResponseSender http_response_;
-
-  ServeRawPubSubOverHTTP() = delete;
-  ServeRawPubSubOverHTTP(const ServeRawPubSubOverHTTP&) = delete;
-  void operator=(const ServeRawPubSubOverHTTP&) = delete;
-  ServeRawPubSubOverHTTP(ServeRawPubSubOverHTTP&&) = delete;
-  void operator=(ServeRawPubSubOverHTTP&&) = delete;
+// The `Box` structure encapsulates the state of the demo.
+// All call to it, updates and reads, go through the message queue, and thus are sequential.
+struct Box {
+  std::vector<std::string> users;
+  std::vector<std::string> questions;
+  std::map<schema::QID, std::map<schema::UID, schema::ANSWER>> answers;
 };
 
-class Cruncher {
+// The `Cruncher` defines a real (no shit!) TailProduce worker.
+// It maintains the consistency of the `Box` and allows access to it.
+//
+// `Cruncher` works with two inputs of two "universes":
+// 1) The `storage::Record` entries, which update the state of the `Box`, and
+// 2) The `*MQMessage` messages, which use the `Box` to generate API responses or for other needs (ex. timer).
+//
+// The inputs of both universes get delivered to the `Cruncher` via the message queue.
+// Thus, they are processed sequentially, and no multithreading collisions can occur in the meantime.
+class Cruncher final {
  public:
-  struct types {
-    typedef db::Record base;
-    typedef std::tuple<db::AnswerRecord, db::QuestionRecord, db::UserRecord> derived_list;
-    typedef bricks::rtti::RuntimeTupleDispatcher<base, derived_list> dispatcher;
+  Cruncher(int port, const std::string& demo_id)
+      : demo_id_(demo_id),
+        u_total_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_u_total", "point")),
+        q_total_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_q_total", "point")),
+        image_(sherlock::Stream<VizPoint<std::string>>(demo_id_ + "_image", "point")),
+        consumer_(demo_id_),
+        mq_(consumer_),
+        metronome_thread_(&Cruncher::Metronome, this) {
+    // Data stream.
+    HTTP(port).Register("/" + demo_id_ + "/layout/u_total_data", u_total_);
+    HTTP(port).Register("/" + demo_id_ + "/layout/q_total_data", q_total_);
+    HTTP(port).Register("/" + demo_id_ + "/layout/image_data", image_);
+
+    // TODO(dkorolev): This, of course, will be refactored. -- D.K.
+    std::thread([this]() {
+                  int index = 0;
+                  while (true) {
+                    image_.Publish(VizPoint<std::string>{static_cast<double>(bricks::time::Now()),
+                                                         Printf("/lorempixel/%d.jpg", index + 1)});
+                    index = (index + 1) % 10;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+                  }
+                }).detach();
+
+    // The black magic of serving the dashboard.
+    HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), "/" + demo_id_ + "/static/");
+
+    HTTP(port).Register("/" + demo_id_ + "/config", [](Request r) {
+      r(dashboard::Config("layout"), "config");  // URL relative to `config`.
+    });
+
+    HTTP(port).Register("/" + demo_id_ + "/layout", [](Request r) {
+      using namespace dashboard::layout;
+      // `/meta` URL-s are relative to `/layout`.
+      r(Layout(Row({Col({Cell("/q_total_meta"), Cell("/u_total_meta")}), Cell("/image_meta")})), "layout");
+    });
+
+    HTTP(port).Register("/" + demo_id_ + "/layout/u_total_meta", [](Request r) {
+      auto meta = dashboard::Meta();
+      meta.options.caption = "Total users.";
+      meta.data_url = "/u_total_data";
+      r(meta, "meta");
+    });
+
+    HTTP(port).Register("/" + demo_id_ + "/layout/q_total_meta", [](Request r) {
+      auto meta = dashboard::Meta();
+      meta.options.caption = "Total questions.";
+      meta.data_url = "/q_total_data";
+      r(meta, "meta");
+    });
+
+    HTTP(port).Register("/" + demo_id_ + "/layout/image_meta", [](Request r) {
+      auto meta = dashboard::ImageMeta();
+      meta.options.header_text = "Here be dragons.";
+      meta.data_url = "/image_data";
+      r(meta, "meta");
+    });
+
+    // Need a dedicated handler for '$DEMO_ID/' to serve the nicely looking dashboard.
+    HTTP(port).Register(
+        "/" + demo_id_ + "/",
+        new bricks::net::api::StaticFileServer(
+            bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "dashboard.html")),
+            "text/html"));
+  }
+
+  ~Cruncher() {
+    // TODO(dkorolev): There should probably be a better, more Bricks-standard way to make use of a metronome.
+    metronome_thread_.join();
+  }
+
+  struct FunctionMQMessage : schema::Base {
+    std::function<void(Box&)> function_with_box;
+    FunctionMQMessage() = delete;
+    explicit FunctionMQMessage(std::function<void(Box&)> f) : function_with_box(f) {}
   };
 
-  struct Box {
-    std::vector<std::string> users;
-    std::vector<std::string> questions;
-    std::map<db::QID, std::map<db::UID, db::ANSWER>> answers;
+  struct HTTPRequestMQMessage : schema::Base {
+    Request request;
+    std::function<void(Request, Box&)> http_function_with_box;
+    HTTPRequestMQMessage() = delete;
+    explicit HTTPRequestMQMessage(Request r, std::function<void(Request, Box&)> f)
+        : request(std::move(r)), http_function_with_box(f) {}
   };
 
-  Cruncher(int port, const std::string& name)
-      : port_(port), name_(name), methronome_thread_(&Cruncher::Methronome, this) {}
+  struct TickMQMessage : schema::Base {
+    typedef sherlock::StreamInstance<VizPoint<int>> stream_type;
+    stream_type& p_u_total;
+    stream_type& p_q_total;
+    TickMQMessage() = delete;
+    TickMQMessage(stream_type& u, stream_type& p) : p_u_total(u), p_q_total(p) {}
+  };
 
-  ~Cruncher() { methronome_thread_.join(); }
-
-  // TODO(dkorolev): Move this to a message queue.
-  Box GetBox() const { return box_; }
-
-  inline bool Entry(const std::unique_ptr<db::Record>& entry) {
-    types::dispatcher::DispatchCall(*entry, *this);
+  inline bool Entry(std::unique_ptr<schema::Base>& entry) {
+    // Note: The following call transfers ownership away from the passed in `unique_ptr`
+    // into the `unique_ptr` in the message queue.
+    // Looks straighforward to me after refactoring everything around it, yet comments and very welcome. -- D.K.
+    mq_.EmplaceMessage(entry.release());
     return true;
   }
 
-  inline void operator()(db::Record&) { throw std::logic_error("Should not happen."); }
+  inline void Terminate() { std::cerr << '@' << demo_id_ << " is done.\n"; }
 
-  inline void operator()(db::UserRecord& u) {
-    std::cerr << '@' << name_ << " +U: " << u.uid << '\n';
-    box_.users.push_back(u.uid);
+  void CallFunctionWithBox(std::function<void(Box&)> f) { mq_.EmplaceMessage(new FunctionMQMessage(f)); }
+
+  void ServeRequestWithBox(Request r, std::function<void(Request, Box&)> f) {
+    mq_.EmplaceMessage(new HTTPRequestMQMessage(std::move(r), f));
   }
 
-  inline void operator()(db::QuestionRecord& q) {
-    std::cerr << '@' << name_ << " +Q" << static_cast<size_t>(q.qid) << " : \"" << q.text << "\"\n";
-    box_.questions.push_back(q.text);
-  }
+  struct Consumer {
+    const std::string& demo_id_;
+    Box box_;
+    Consumer() = delete;
+    Consumer(const std::string& demo_id) : demo_id_(demo_id) {}
 
-  inline void operator()(db::AnswerRecord& a) {
-    std::cerr << '@' << name_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
-              << static_cast<size_t>(a.qid) << '\n';
-    box_.answers[a.qid][a.uid] = a.answer;
-  }
+    inline void OnMessage(std::unique_ptr<schema::Base>& message, size_t) {
+      struct types {
+        typedef schema::Base base;
+        typedef std::tuple<schema::AnswerRecord,
+                           schema::QuestionRecord,
+                           schema::UserRecord,
+                           FunctionMQMessage,
+                           HTTPRequestMQMessage,
+                           TickMQMessage> derived_list;
+        typedef bricks::rtti::RuntimeTupleDispatcher<base, derived_list> dispatcher;
+      };
+      types::dispatcher::DispatchCall(*message, *this);
+    }
 
-  inline void Terminate() { std::cerr << '@' << name_ << " is done.\n"; }
+    inline void operator()(schema::Base&) { throw std::logic_error("Should not happen (schema::Base)."); }
+    inline void operator()(schema::Record&) { throw std::logic_error("Should not happen (schema::Record)."); }
 
-  // TODO(dkorolev): Perhaps move the methronome into Bricks, and make it use a lambda?
-  void Methronome() {
-    // Update real-time plots every second.
-    const MILLISECONDS_INTERVAL period = static_cast<MILLISECONDS_INTERVAL>(1000);
+    inline void operator()(schema::UserRecord& u) {
+      std::cerr << '@' << demo_id_ << " +U: " << u.uid << '\n';
+      box_.users.push_back(u.uid);
+    }
 
-    auto q_total = sherlock::Stream<VizPoint<int>>(name_ + "_q_total");
+    inline void operator()(schema::QuestionRecord& q) {
+      std::cerr << '@' << demo_id_ << " +Q" << static_cast<size_t>(q.qid) << " : \"" << q.text << "\"\n";
+      box_.questions.push_back(q.text);
+    }
 
-    HTTP(port_).Register("/" + name_ + "/d/q_total/data", [&q_total](Request r) {
-      q_total.Subscribe(new ServeRawPubSubOverHTTP<VizPoint<int>>(std::move(r))).Detach();
-    });
+    inline void operator()(schema::AnswerRecord& a) {
+      std::cerr << '@' << demo_id_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
+                << static_cast<size_t>(a.qid) << '\n';
+      box_.answers[a.qid][a.uid] = a.answer;
+    }
 
-    // Keep pushing data into the
+    inline void operator()(FunctionMQMessage& message) { message.function_with_box(box_); }
+
+    inline void operator()(HTTPRequestMQMessage& message) {
+      message.http_function_with_box(std::move(message.request), box_);
+    }
+
+    inline void operator()(TickMQMessage& message) {
+      message.p_u_total.Publish(VizPoint<int>{static_cast<double>(Now()), static_cast<int>(box_.users.size())});
+      message.p_q_total.Publish(
+          VizPoint<int>{static_cast<double>(Now()), static_cast<int>(box_.questions.size())});
+    }
+  };
+
+  // TODO(dkorolev): There should probably be a better, more Bricks-standard way to make use of a metronome.
+  void Metronome() {
+    const MILLISECONDS_INTERVAL period = static_cast<MILLISECONDS_INTERVAL>(250);
     EPOCH_MILLISECONDS now = Now();
     while (true) {
-      std::cerr << "HA\n";
-      // TODO(dkorolev): This call should go via an MQ.
-      q_total.Publish(VizPoint<int>{static_cast<double>(now), static_cast<int>(box_.questions.size())});
+      mq_.EmplaceMessage(new TickMQMessage(u_total_, q_total_));
       bricks::time::SleepUntil(now + period);
       now = Now();
     }
   }
 
  private:
-  const int port_;
-  const std::string& name_;
-  std::thread methronome_thread_;
-  Box box_;
+  const std::string& demo_id_;
+
+  sherlock::StreamInstance<VizPoint<int>> u_total_;
+  sherlock::StreamInstance<VizPoint<int>> q_total_;
+  sherlock::StreamInstance<VizPoint<std::string>> image_;
+
+  Consumer consumer_;
+  MMQ<Consumer, std::unique_ptr<schema::Base>> mq_;
+
+  std::thread metronome_thread_;
 
   Cruncher() = delete;
   Cruncher(const Cruncher&) = delete;
@@ -163,99 +271,101 @@ class Cruncher {
 
 struct Controller {
  public:
-  explicit Controller(int port, const std::string& name, db::AgreeDisagreeStorage* db)
+  explicit Controller(int port, const std::string& demo_id, db::Storage* db)
       : port_(port),
-        name_(name),
+        demo_id_(demo_id),
+        html_header_(FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "actions_header.html"))),
+        html_footer_(FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "actions_footer.html"))),
         db_(db),
-        cruncher_(port_, name_),
-        cruncher_subscription_scope_(db_->Subscribe(cruncher_)),
-        controller_boilerplate_html_(
-            FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "controls.html"))) {
+        cruncher_(port_, demo_id_),
+        scope_(db_->Subscribe(cruncher_)) {
     // The main controller page.
-    HTTP(port_)
-        .Register("/" + name_ + "/actions", std::bind(&Controller::Actions, this, std::placeholders::_1));
-
-    // Raw PubSub as JSON.
-    HTTP(port_).Register("/" + name_ + "/raw", [this](Request r) {
-      db_->Subscribe(new ServeRawPubSubOverHTTP<std::unique_ptr<db::Record>>(std::move(r))).Detach();
+    HTTP(port_).Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
+    HTTP(port).Register("/" + demo_id_ + "/a", [this](Request r) {
+      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id_ + "/a/"));
     });
 
-    // Pre-populate a few users, questions and answers.
+    // Make the storage-level stream accessible to the outer world via PubSub.
+    HTTP(port_).Register("/" + demo_id_ + "/a/raw", std::ref(*db_));
+
+    // Pre-populate a few users, questions and answers to start from.
     db->DoAddUser("dima", Now() - MILLISECONDS_INTERVAL(5000));
     db->DoAddUser("alice", Now() - MILLISECONDS_INTERVAL(4000));
     db->DoAddUser("bob", Now() - MILLISECONDS_INTERVAL(3000));
     db->DoAddUser("charles", Now() - MILLISECONDS_INTERVAL(2000));
+
     const auto vi = db->DoAddQuestion("Vi is the best text editor.", Now() - MILLISECONDS_INTERVAL(4500)).qid;
     const auto weed = db->DoAddQuestion("Marijuana should be legal.", Now() - MILLISECONDS_INTERVAL(3500)).qid;
     const auto bubble = db->DoAddQuestion("We are in the bubble.", Now() - MILLISECONDS_INTERVAL(2500)).qid;
     const auto movies = db->DoAddQuestion("Movies are getting worse.", Now() - MILLISECONDS_INTERVAL(1500)).qid;
-    db->DoAddAnswer("dima", vi, db::ANSWER::YES, Now());
-    db->DoAddAnswer("dima", weed, db::ANSWER::YES, Now());
-    db->DoAddAnswer("dima", bubble, db::ANSWER::NO, Now());
-    db->DoAddAnswer("dima", movies, db::ANSWER::YES, Now());
-    db->DoAddAnswer("alice", vi, db::ANSWER::NO, Now());
-    db->DoAddAnswer("alice", weed, db::ANSWER::NO, Now());
-    db->DoAddAnswer("bob", movies, db::ANSWER::NO, Now());
-    db->DoAddAnswer("bob", bubble, db::ANSWER::YES, Now());
-    db->DoAddAnswer("charles", vi, db::ANSWER::NO, Now());
-    db->DoAddAnswer("charles", weed, db::ANSWER::NO, Now());
-    db->DoAddAnswer("charles", bubble, db::ANSWER::YES, Now());
-    db->DoAddAnswer("charles", movies, db::ANSWER::NO, Now());
+
+    db->DoAddAnswer("dima", vi, schema::ANSWER::YES, Now());
+    db->DoAddAnswer("dima", weed, schema::ANSWER::YES, Now());
+    db->DoAddAnswer("dima", bubble, schema::ANSWER::NO, Now());
+    db->DoAddAnswer("dima", movies, schema::ANSWER::YES, Now());
+    db->DoAddAnswer("alice", vi, schema::ANSWER::NO, Now());
+    db->DoAddAnswer("alice", weed, schema::ANSWER::NO, Now());
+    db->DoAddAnswer("bob", movies, schema::ANSWER::NO, Now());
+    db->DoAddAnswer("bob", bubble, schema::ANSWER::YES, Now());
+    db->DoAddAnswer("charles", vi, schema::ANSWER::NO, Now());
+    db->DoAddAnswer("charles", weed, schema::ANSWER::NO, Now());
+    db->DoAddAnswer("charles", bubble, schema::ANSWER::YES, Now());
+    db->DoAddAnswer("charles", movies, schema::ANSWER::NO, Now());
   }
 
   void Actions(Request r) {
-    std::ostringstream table;
-    Cruncher::Box box = cruncher_.GetBox();
-    table << "<tr><td></td>";
-    for (const auto& u : box.users) {
-      table << "<td align=center><b>" << u << "</b></td>";
-    }
-    table << "<tr>\n";
-    for (size_t qi = 0; qi < box.questions.size(); ++qi) {
-      const auto& q = box.questions[qi];
-      table << "<tr><td align=right><b>" << q << "</b></td>";
-      std::map<db::UID, db::ANSWER>& current_answers = box.answers[static_cast<db::QID>(qi + 1)];
+    // This request goes through the Cruncher's message queue to ensure no concurrent access to the box.
+    cruncher_.ServeRequestWithBox(std::move(r), [this](Request r, Box& box) {
+      std::ostringstream table;
+      table << "<tr><td></td>";
       for (const auto& u : box.users) {
-        table << "<td align=center>";
-        struct ValueTextColor {
-          int value;
-          const char* text;
-          const char* color;
-        };
-        static constexpr ValueTextColor options[3] = {
-            {-1, "No", "red"}, {0, "N/A", "gray"}, {+1, "Yes", "green"}};
-        const int current_answer = static_cast<int>(current_answers[u]);
-        for (size_t i = 0; i < 3; ++i) {
-          if (i) {
-            table << " | ";
-          }
-          if (options[i].value != current_answer) {
-            table << Printf("<a href='add_answer?uid=%s&qid=%d&answer=%d'>%s</a>",
-                            u.c_str(),
-                            static_cast<int>(qi + 1),
-                            options[i].value,
-                            options[i].text);
-          } else {
-            table << Printf("<b><font color=%s>%s</font></b>", options[i].color, options[i].text);
-          }
-        }
-        table << "</td>";
+        table << "<td align=center><b>" << u << "</b></td>";
       }
-      table << "</tr>\n";
-    }
-    r(Printf(controller_boilerplate_html_.c_str(), table.str().c_str()), HTTPResponseCode.OK, "text/html");
+      table << "<tr>\n";
+      for (size_t qi = 0; qi < box.questions.size(); ++qi) {
+        const auto& q = box.questions[qi];
+        table << "<tr><td align=right><b>" << q << "</b></td>";
+        std::map<schema::UID, schema::ANSWER>& current_answers = box.answers[static_cast<schema::QID>(qi + 1)];
+        for (const auto& u : box.users) {
+          table << "<td align=center>";
+          struct VTC {  // VTC = { Value, Text, Color }.
+            int value;
+            const char* text;
+            const char* color;
+          };
+          static constexpr VTC options[3] = {{-1, "No", "red"}, {0, "N/A", "gray"}, {+1, "Yes", "green"}};
+          const int current_answer = static_cast<int>(current_answers[u]);
+          for (size_t i = 0; i < 3; ++i) {
+            if (i) {
+              table << " | ";
+            }
+            if (options[i].value != current_answer) {
+              table << Printf("<a href='add_answer?uid=%s&qid=%d&answer=%d'>%s</a>",
+                              u.c_str(),
+                              static_cast<int>(qi + 1),
+                              options[i].value,
+                              options[i].text);
+            } else {
+              table << Printf("<b><font color=%s>%s</font></b>", options[i].color, options[i].text);
+            }
+          }
+          table << "</td>";
+        }
+        table << "</tr>\n";
+      }
+      r(html_header_ + table.str() + html_footer_, HTTPResponseCode.OK, "text/html");
+    });
   }
 
  private:
   const int port_;
-  const std::string name_;
+  const std::string demo_id_;
+  const std::string html_header_;
+  const std::string html_footer_;
 
-  db::AgreeDisagreeStorage* db_;
+  db::Storage* db_;  // `db_` is owned by the creator of the instance of `Controller`.
   Cruncher cruncher_;
-  typename sherlock::StreamInstanceImpl<std::unique_ptr<db::Record>>::template ListenerScope<Cruncher>
-      cruncher_subscription_scope_;
-
-  const std::string controller_boilerplate_html_;
+  typename sherlock::StreamInstance<std::unique_ptr<schema::Base>>::template ListenerScope<Cruncher> scope_;
 
   Controller() = delete;
 };
@@ -267,20 +377,23 @@ int main() {
   HTTP(port).Register("/new", [&port](Request r) {
     if (r.method == "POST") {
       uint64_t salt = static_cast<uint64_t>(Now());
-      // Randomly generated name w/o safety checking. -- D.K.
-      std::string name = "";
+      // Randomly generated `demo_id` w/o safety checking. -- D.K.
+      std::string demo_id = "";
       for (size_t i = 0; i < 5; ++i) {
-        name += ('a' + (salt % 26));
+        demo_id = std::string(1, ('a' + (salt % 26))) + demo_id;  // "MSB" first ordering.
         salt /= 26;
       }
-      auto demo = new db::AgreeDisagreeStorage(port, name);  // Lives forever. -- D.K.
-      auto controller = new Controller(port, name, demo);    // Lives forever. -- D.K.
+      auto demo = new db::Storage(port, demo_id);             // Lives forever. -- D.K.
+      auto controller = new Controller(port, demo_id, demo);  // Lives forever. -- D.K.
       static_cast<void>(controller);
-      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders({{"Location", "/" + name + "/actions"}}));
+      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id + "/a/"));
     } else {
       r(bricks::net::DefaultMethodNotAllowedMessage(), HTTPResponseCode.MethodNotAllowed, "text/html");
     }
   });
+
+  // Lorempixel images.
+  HTTP(port).ServeStaticFilesFrom("lorempixel", "/lorempixel/");
 
   // Landing page.
   const std::string dir = "static/";
