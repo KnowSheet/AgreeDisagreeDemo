@@ -60,7 +60,7 @@ struct VizPoint {
 };
 
 // The `Box` structure encapsulates the state of the demo.
-// All call to it, updates and reads, go through the message queue, and thus are sequential.
+// All calls to it, updates and reads, go through the message queue, and thus are sequential.
 struct Box {
   std::vector<std::string> users;
   std::vector<std::string> questions;

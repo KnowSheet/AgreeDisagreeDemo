@@ -27,6 +27,8 @@ SOFTWARE.
 
 #include "../Bricks/port.h"
 
+#include <vector>
+#include <set>
 #include <string>
 
 #include "schema.h"
@@ -178,6 +180,7 @@ class Storage final {
       }
     }
   }
+
   void HandleAddU(Request r) {
     const schema::UID uid = r.url.query["uid"];
     if (uid.empty()) {
