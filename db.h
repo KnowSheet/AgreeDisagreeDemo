@@ -128,7 +128,7 @@ class Storage final {
     return record;
   }
 
-  void operator()(Request r) { sherlock_stream_(std::move(r)); }  //.ServeDataViaHTTP(std::move(r)); }
+  void operator()(Request r) { sherlock_stream_(std::move(r)); }
 
  private:
   // Retrieves or creates questions.
