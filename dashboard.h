@@ -31,6 +31,7 @@ SOFTWARE.
 #include <vector>
 
 #include "../Bricks/cerealize/cerealize.h"
+#include "../Bricks/strings/printf.h"
 #include "../Bricks/file/file.h"
 
 namespace dashboard {
@@ -44,10 +45,16 @@ struct Config {
   // The static template.
   std::string dashboard_template;
 
-  explicit Config(const std::string& layout_url = "/layout")
+  explicit Config(const std::string& layout_url)
       : layout_url(layout_url),
         dashboard_template(
-            bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "template.html"))) {}
+            bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "template.html"))) {
+    // TODO(dkorolev)+TODO(sompylasar): Resolve absolute + relative paths troubles when hostname changes.
+    for (int i = 0; i < 10; ++i) {
+      data_hostnames.push_back(bricks::strings::Printf("d%d.knowsheet.local", i));
+    }
+    // Note: This implemenation assumes port 80 is routed to 3000. -- D.K.
+  }
 
   template <typename A>
   void save(A& ar) const {

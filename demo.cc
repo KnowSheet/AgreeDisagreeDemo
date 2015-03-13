@@ -86,62 +86,74 @@ class Cruncher final {
         consumer_(demo_id_),
         mq_(consumer_),
         metronome_thread_(&Cruncher::Metronome, this) {
-    // Data stream.
-    HTTP(port).Register("/" + demo_id_ + "/layout/u_total_data", u_total_);
-    HTTP(port).Register("/" + demo_id_ + "/layout/q_total_data", q_total_);
-    HTTP(port).Register("/" + demo_id_ + "/layout/image_data", image_);
+    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
+    try {
+      // Data stream.
+      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/u_total_data", u_total_);
+      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/q_total_data", q_total_);
+      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/image_data", image_);
 
-    // TODO(dkorolev): This, of course, will be refactored. -- D.K.
-    std::thread([this]() {
-                  int index = 0;
-                  while (true) {
-                    image_.Publish(VizPoint<std::string>{static_cast<double>(bricks::time::Now()),
-                                                         Printf("/lorempixel/%d.jpg", index + 1)});
-                    index = (index + 1) % 10;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-                  }
-                }).detach();
+      // TODO(dkorolev): This, of course, will be refactored. -- D.K.
+      std::thread([this]() {
+                    int index = 0;
+                    while (true) {
+                      // Note that in order for the `http://d0.knowsheet.local/lorempixel/%d.jpg` URL-s to work,
+                      // 1) `d0.knowsheet.local` should point to `localhost` in `/etc/hosts`, and
+                      // 2) Port 80 should be forwarded (or the demo should run on it).
+                      image_.Publish(VizPoint<std::string>{
+                          static_cast<double>(bricks::time::Now()),
+                          Printf("http://d0.knowsheet.local/lorempixel/%d.jpg", index + 1)});
+                      index = (index + 1) % 10;
+                      std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+                    }
+                  }).detach();
 
-    // The black magic of serving the dashboard.
-    HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), "/" + demo_id_ + "/static/");
+      // The black magic of serving the dashboard.
+      HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), /* "/" + demo_id_ + */ "/static/");
 
-    HTTP(port).Register("/" + demo_id_ + "/config", [](Request r) {
-      r(dashboard::Config("layout"), "config");  // URL relative to `config`.
-    });
+      HTTP(port).Register(/*"/" + demo_id_* + */ "/config", [this](Request r) {
+        r(dashboard::Config("layout"), "config");  // URL relative to `config`.
+      });
 
-    HTTP(port).Register("/" + demo_id_ + "/layout", [](Request r) {
-      using namespace dashboard::layout;
-      // `/meta` URL-s are relative to `/layout`.
-      r(Layout(Row({Col({Cell("/q_total_meta"), Cell("/u_total_meta")}), Cell("/image_meta")})), "layout");
-    });
+      HTTP(port).Register(/*"/" + demo_id_ + */ "/layout", [](Request r) {
+        using namespace dashboard::layout;
+        // `/meta` URL-s are relative to `/layout`.
+        r(Layout(Row({Col({Cell("/q_total_meta"), Cell("/u_total_meta")}), Cell("/image_meta")})), "layout");
+      });
 
-    HTTP(port).Register("/" + demo_id_ + "/layout/u_total_meta", [](Request r) {
-      auto meta = dashboard::Meta();
-      meta.options.caption = "Total users.";
-      meta.data_url = "/u_total_data";
-      r(meta, "meta");
-    });
+      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/u_total_meta", [this](Request r) {
+        auto meta = dashboard::Meta();
+        meta.options.caption = "Total users.";
+        meta.data_url = "/d/u_total_data";
+        r(meta, "meta");
+      });
 
-    HTTP(port).Register("/" + demo_id_ + "/layout/q_total_meta", [](Request r) {
-      auto meta = dashboard::Meta();
-      meta.options.caption = "Total questions.";
-      meta.data_url = "/q_total_data";
-      r(meta, "meta");
-    });
+      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/q_total_meta", [this](Request r) {
+        auto meta = dashboard::Meta();
+        meta.options.caption = "Total questions.";
+        meta.data_url = "/d/q_total_data";
+        r(meta, "meta");
+      });
 
-    HTTP(port).Register("/" + demo_id_ + "/layout/image_meta", [](Request r) {
-      auto meta = dashboard::ImageMeta();
-      meta.options.header_text = "Here be dragons.";
-      meta.data_url = "/image_data";
-      r(meta, "meta");
-    });
+      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/image_meta", [this](Request r) {
+        auto meta = dashboard::ImageMeta();
+        meta.options.header_text = "Here be dragons.";
+        meta.data_url = "/d/image_data";
+        r(meta, "meta");
+      });
 
-    // Need a dedicated handler for '$DEMO_ID/' to serve the nicely looking dashboard.
-    HTTP(port).Register(
-        "/" + demo_id_ + "/",
-        new bricks::net::api::StaticFileServer(
-            bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "index.html")),
-            "text/html"));
+      // Need a dedicated handler for '$DEMO_ID/' to serve the nicely looking dashboard.
+      // WARNING! WARNING! WARNING! Removing the old handler is a temporary hack! -- D.K.
+      HTTP(port).UnRegister("/");
+      HTTP(port).Register(
+          /* "/" + demo_id_ + */ "/",
+          new bricks::net::api::StaticFileServer(
+              bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "index.html")),
+              "text/html"));
+    } catch (const bricks::Exception& e) {
+      std::cerr << "Crunched constructor exception: " << e.What() << std::endl;
+      throw;
+    }
   }
 
   ~Cruncher() {
@@ -280,13 +292,16 @@ struct Controller {
         cruncher_(port_, demo_id_),
         scope_(db_->Subscribe(cruncher_)) {
     // The main controller page.
-    HTTP(port_).Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
-    HTTP(port).Register("/" + demo_id_ + "/a", [this](Request r) {
-      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id_ + "/a/"));
+    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
+    HTTP(port_)
+        .Register(/* "/" + demo_id_ + */ "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
+    HTTP(port).Register(/* "/" + demo_id_ + */ "/a", [this](Request r) {
+      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", /* "/" + demo_id_ + */ "/a/"));
     });
 
     // Make the storage-level stream accessible to the outer world via PubSub.
-    HTTP(port_).Register("/" + demo_id_ + "/a/raw", std::ref(*db_));
+    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
+    HTTP(port_).Register(/* "/" + demo_id_ + */ "/a/raw", std::ref(*db_));
 
     // Pre-populate a few users, questions and answers to start from.
     db->DoAddUser("dima", Now() - MILLISECONDS_INTERVAL(5000));
@@ -376,17 +391,24 @@ int main() {
   // Create and redirect to a new demo when POST-ed onto `/new`.
   HTTP(port).Register("/new", [&port](Request r) {
     if (r.method == "POST") {
-      uint64_t salt = static_cast<uint64_t>(Now());
-      // Randomly generated `demo_id` w/o safety checking. -- D.K.
-      std::string demo_id = "";
-      for (size_t i = 0; i < 5; ++i) {
-        demo_id = std::string(1, ('a' + (salt % 26))) + demo_id;  // "MSB" first ordering.
-        salt /= 26;
+      try {
+        uint64_t salt = static_cast<uint64_t>(Now());
+        // Randomly generated `demo_id` w/o safety checking. -- D.K.
+        std::string demo_id = "";
+        for (size_t i = 0; i < 5; ++i) {
+          demo_id = std::string(1, ('a' + (salt % 26))) + demo_id;  // "MSB" first ordering.
+          salt /= 26;
+        }
+        auto demo = new db::Storage(port, demo_id);             // Lives forever. -- D.K.
+        auto controller = new Controller(port, demo_id, demo);  // Lives forever. -- D.K.
+        static_cast<void>(controller);
+        // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
+        // r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id + "/a/"));
+        r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/a/"));
+      } catch (const bricks::Exception& e) {
+        std::cerr << "Demo creation exception: " << e.What() << std::endl;
+        throw;
       }
-      auto demo = new db::Storage(port, demo_id);             // Lives forever. -- D.K.
-      auto controller = new Controller(port, demo_id, demo);  // Lives forever. -- D.K.
-      static_cast<void>(controller);
-      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id + "/a/"));
     } else {
       r(bricks::net::DefaultMethodNotAllowedMessage(), HTTPResponseCode.MethodNotAllowed, "text/html");
     }

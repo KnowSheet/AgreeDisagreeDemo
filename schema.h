@@ -35,8 +35,8 @@ SOFTWARE.
 // Schema for storage records and low-level API calls.
 namespace schema {
 
-typedef std::string UID;                                // User ID, just use their name.
-enum class QID : size_t { NONE = 0 };                   // Question ID, 1-based, 0 is unused.
+typedef std::string UID;                                        // User ID, just use their name.
+enum class QID : size_t { NONE = 0 };                           // Question ID, 1-based, 0 is unused.
 enum class ANSWER : int { DISAGREE = -1, NA = 0, AGREE = +1 };  // Answer, one of { AGREE, DISAGREE, NA }.
 
 struct Base {
