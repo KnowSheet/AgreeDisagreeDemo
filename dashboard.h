@@ -62,7 +62,7 @@ struct Config {
   }
 };
 
-struct Meta {
+struct PlotMeta {
   struct Options {
     std::string caption = "<CAPTION>";
     std::string color = "blue";

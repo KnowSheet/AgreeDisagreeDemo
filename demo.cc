@@ -39,7 +39,10 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 #include "../Bricks/rtti/dispatcher.h"
 #include "../Bricks/net/api/api.h"
 #include "../Bricks/mq/inmemory/mq.h"
+#include "../Bricks/graph/gnuplot.h"
 #include "../Bricks/dflags/dflags.h"
+#include "../Bricks/util/singleton.h"
+#include "../fncas/fncas/fncas.h"
 
 DEFINE_int32(port, 3000, "Local port to use.");
 
@@ -83,30 +86,33 @@ class Cruncher final {
         u_total_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_u_total", "point")),
         q_total_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_q_total", "point")),
         image_(sherlock::Stream<VizPoint<std::string>>(demo_id_ + "_image", "point")),
-        consumer_(demo_id_),
+        consumer_(demo_id_, image_),
         mq_(consumer_),
         metronome_thread_(&Cruncher::Metronome, this) {
     // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
     try {
-      // Data stream.
+      // Data streams.
       HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/u_total_data", u_total_);
       HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/q_total_data", q_total_);
       HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/image_data", image_);
 
-      // TODO(dkorolev): This, of course, will be refactored. -- D.K.
-      std::thread([this]() {
-                    int index = 0;
-                    while (true) {
-                      // Note that in order for the `http://d0.knowsheet.local/lorempixel/%d.jpg` URL-s to work,
-                      // 1) `d0.knowsheet.local` should point to `localhost` in `/etc/hosts`, and
-                      // 2) Port 80 should be forwarded (or the demo should run on it).
-                      image_.Publish(VizPoint<std::string>{
-                          static_cast<double>(bricks::time::Now()),
-                          Printf("http://d0.knowsheet.local/lorempixel/%d.jpg", index + 1)});
-                      index = (index + 1) % 10;
-                      std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-                    }
-                  }).detach();
+      // The visualization comes from `Consumer`/`Cruncher`, as well as the updates to this stream.
+      if (false) {
+        // TODO(dkorolev): This, of course, will be refactored. -- D.K.
+        std::thread([this]() {
+                      int index = 0;
+                      while (true) {
+                        // Note that in order for the `http://d0.knowsheet.local/...` URL-s to work,
+                        // 1) `d0.knowsheet.local` should point to `localhost` in `/etc/hosts`, and
+                        // 2) Port 80 should be forwarded (or the demo should run on it).
+                        image_.Publish(VizPoint<std::string>{
+                            static_cast<double>(bricks::time::Now()),
+                            Printf("http://d0.knowsheet.local/lorempixel/%d.jpg", index + 1)});
+                        index = (index + 1) % 10;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                      }
+                    }).detach();
+      }
 
       // The black magic of serving the dashboard.
       HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), /* "/" + demo_id_ + */ "/static/");
@@ -122,14 +128,14 @@ class Cruncher final {
       });
 
       HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/u_total_meta", [this](Request r) {
-        auto meta = dashboard::Meta();
+        auto meta = dashboard::PlotMeta();
         meta.options.caption = "Total users.";
         meta.data_url = "/d/u_total_data";
         r(meta, "meta");
       });
 
       HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/q_total_meta", [this](Request r) {
-        auto meta = dashboard::Meta();
+        auto meta = dashboard::PlotMeta();
         meta.options.caption = "Total questions.";
         meta.data_url = "/d/q_total_data";
         r(meta, "meta");
@@ -137,7 +143,7 @@ class Cruncher final {
 
       HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/image_meta", [this](Request r) {
         auto meta = dashboard::ImageMeta();
-        meta.options.header_text = "Here be dragons.";
+        meta.options.header_text = "Users' Agreement";
         meta.data_url = "/d/image_data";
         r(meta, "meta");
       });
@@ -150,6 +156,9 @@ class Cruncher final {
           new bricks::net::api::StaticFileServer(
               bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "index.html")),
               "text/html"));
+
+      HTTP(port)
+          .Register("/viz.png", [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
     } catch (const bricks::Exception& e) {
       std::cerr << "Crunched constructor exception: " << e.What() << std::endl;
       throw;
@@ -173,6 +182,12 @@ class Cruncher final {
     HTTPRequestMQMessage() = delete;
     explicit HTTPRequestMQMessage(Request r, std::function<void(Request, Box&)> f)
         : request(std::move(r)), http_function_with_box(f) {}
+  };
+
+  struct VizMQMessage : schema::Base {
+    Request request;
+    VizMQMessage() = delete;
+    explicit VizMQMessage(Request r) : request(std::move(r)) {}
   };
 
   struct TickMQMessage : schema::Base {
@@ -202,8 +217,13 @@ class Cruncher final {
   struct Consumer {
     const std::string& demo_id_;
     Box box_;
+
+    std::string current_image_ = "NO DATA YET\n";
+    sherlock::StreamInstance<VizPoint<std::string>>& image_stream_;
+
     Consumer() = delete;
-    Consumer(const std::string& demo_id) : demo_id_(demo_id) {}
+    Consumer(const std::string& demo_id, sherlock::StreamInstance<VizPoint<std::string>>& image_stream)
+        : demo_id_(demo_id), image_stream_(image_stream) {}
 
     inline void OnMessage(std::unique_ptr<schema::Base>& message, size_t) {
       struct types {
@@ -213,6 +233,7 @@ class Cruncher final {
                            schema::UserRecord,
                            FunctionMQMessage,
                            HTTPRequestMQMessage,
+                           VizMQMessage,
                            TickMQMessage> derived_list;
         typedef bricks::rtti::RuntimeTupleDispatcher<base, derived_list> dispatcher;
       };
@@ -225,6 +246,7 @@ class Cruncher final {
     inline void operator()(schema::UserRecord& u) {
       std::cerr << '@' << demo_id_ << " +U: " << u.uid << '\n';
       box_.users.push_back(u.uid);
+      UpdateVisualization();
     }
 
     inline void operator()(schema::QuestionRecord& q) {
@@ -236,6 +258,7 @@ class Cruncher final {
       std::cerr << '@' << demo_id_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
                 << static_cast<size_t>(a.qid) << '\n';
       box_.answers[a.qid][a.uid] = a.answer;
+      UpdateVisualization();
     }
 
     inline void operator()(FunctionMQMessage& message) { message.function_with_box(box_); }
@@ -244,10 +267,163 @@ class Cruncher final {
       message.http_function_with_box(std::move(message.request), box_);
     }
 
+    inline void operator()(VizMQMessage& message) {
+      message.request(current_image_, HTTPResponseCode.OK, "image/png");
+    }
+
     inline void operator()(TickMQMessage& message) {
       message.p_u_total.Publish(VizPoint<int>{static_cast<double>(Now()), static_cast<int>(box_.users.size())});
       message.p_q_total.Publish(
           VizPoint<int>{static_cast<double>(Now()), static_cast<int>(box_.questions.size())});
+    }
+
+    // TODO(dkorolev): Move to optimizing non-static function here.
+    struct StaticFunctionData {
+      size_t N;
+      std::vector<std::vector<size_t>> M;
+
+      struct OutputPoint {
+        double x;
+        double y;
+        const std::string& s;
+      };
+
+      std::vector<OutputPoint> data;
+
+      template <typename T>
+      static typename fncas::output<T>::type compute(const T& x) {
+        const auto& data = bricks::Singleton<StaticFunctionData>();
+
+        assert(x.size() == data.N * 2);  // Pairs of coordinates.
+
+        // Prepare the input.
+        std::vector<std::pair<typename fncas::output<T>::type, typename fncas::output<T>::type>> P(data.N);
+        for (size_t i = 0; i < data.N; ++i) {
+          P[i].first = x[i * 2];
+          P[i].second = x[i * 2 + 1];
+        }
+
+        // Compute the cost function.
+        typename fncas::output<T>::type result = 0.0;
+        // Optimization: Keep the people who disagree with each other further away.
+        for (size_t i = 0; i + 1 < data.N; ++i) {
+          for (size_t j = i + 1; j < data.N; ++j) {
+            const typename fncas::output<T>::type dx = P[j].first - P[i].first;
+            const typename fncas::output<T>::type dy = P[j].second - P[i].second;
+            const typename fncas::output<T>::type d = dx * dx + dy * dy;
+            result += d * (data.M[i][j] + 3.0);
+          }
+        }
+
+        // Regularization: Keep the points around the boundary of the { C={0,0}, R=1 } circle.
+        typename fncas::output<T>::type regularization = 0.0;
+        for (size_t i = 0; i < data.N; ++i) {
+          const typename fncas::output<T>::type d = P[i].first * P[i].first + P[i].second * P[i].second;
+          const typename fncas::output<T>::type d_minus_one = d - 1.0;
+          const typename fncas::output<T>::type d_minus_one_squared = d_minus_one * d_minus_one;
+          regularization += d_minus_one_squared;
+        }
+
+        // Minimize regularization, maximize result.
+        return (regularization * 1.0) - result;
+      }
+
+      void Update(const Box& box) {
+        auto& static_data = bricks::Singleton<StaticFunctionData>();
+        size_t& N = static_data.N;
+        std::vector<std::vector<size_t>>& M = static_data.M;
+
+        std::cerr << "Optimizing.\n";
+
+        N = box.users.size();
+        std::map<std::string, size_t> uid_remap;
+        for (size_t i = 0; i < N; ++i) {
+          uid_remap[box.users[i]] = i;
+        }
+
+        M = std::vector<std::vector<size_t>>(N, std::vector<size_t>(N, 0));
+
+        for (const auto qit : box.answers) {
+          std::vector<std::string> clusters[2];  // Disagree, Agree.
+          for (const auto uit : qit.second) {
+            if (uit.second == schema::ANSWER::DISAGREE) {
+              clusters[0].push_back(uit.first);
+            } else if (uit.second == schema::ANSWER::AGREE) {
+              clusters[1].push_back(uit.first);
+            }
+          }
+          if (!clusters[0].empty() && !clusters[1].empty()) {
+            for (const auto& cit1 : clusters[0]) {
+              for (const auto& cit2 : clusters[1]) {
+                ++M[uid_remap[cit1]][uid_remap[cit2]];
+                ++M[uid_remap[cit2]][uid_remap[cit1]];
+              }
+            }
+          }
+        }
+
+        std::vector<double> x;
+        for (size_t i = 0; i < N; ++i) {
+          const double phi = M_PI * 2 * i / N;
+          x.push_back(cos(phi));
+          x.push_back(sin(phi));
+        }
+
+        for (size_t i = 0; i < N; ++i) {
+          std::cerr << bricks::strings::Printf("P0 = { %+.3lf, %+.3lf }\n", x[i * 2], x[i * 2 + 1]);
+        }
+
+        fncas::OptimizerParameters params;
+        params.SetValue("max_steps", 50);
+        const auto result = fncas::ConjugateGradientOptimizer<StaticFunctionData>(params).Optimize(x);
+
+        x = result.point;
+        for (size_t i = 0; i < N; ++i) {
+          std::cerr << bricks::strings::Printf("P1 = { %+.3lf, %+.3lf }\n", x[i * 2], x[i * 2 + 1]);
+        }
+
+        for (size_t i = 0; i < N; ++i) {
+          std::cerr << bricks::strings::Printf("%10s", box.users[i].c_str());
+          for (size_t j = 0; j < N; ++j) {
+            std::cerr << ' ' << M[i][j];
+          }
+          std::cerr << std::endl;
+        }
+
+        data.clear();
+        for (size_t i = 0; i < N; ++i) {
+          // const double phi = M_PI * 2 * i / N;
+          // data.push_back(OutputPoint{cos(phi), sin(phi), box.users[i]});
+          data.push_back(OutputPoint{x[i * 2], x[i * 2 + 1], box.users[i]});
+        }
+        std::cerr << "Optimizing: Done.\n";
+      }
+    };
+
+    void UpdateVisualization() {
+      const double t = static_cast<double>(bricks::time::Now());
+      bricks::Singleton<StaticFunctionData>().Update(box_);
+      std::cerr << bricks::strings::Printf("Optimization took %.2lf seconds.\n",
+                                           1e-3 * (static_cast<double>(bricks::time::Now()) - t));
+
+      using namespace bricks::gnuplot;
+      const auto f = [](Plotter& p) {
+        const auto& data = bricks::Singleton<StaticFunctionData>().data;
+        for (const auto& cit : data) {
+          p(cit.x, cit.y, cit.s);
+        }
+      };
+
+      // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
+      current_image_ = GNUPlot()
+                           .TermSize(400, 400)
+                           .NoTitle()
+                           .NoKey()
+                           .NoTics()
+                           .NoBorder()
+                           .Plot(WithMeta(f).AsLabels())
+                           .OutputFormat("pngcairo");
+      image_stream_.Publish(VizPoint<std::string>{t, Printf("http://d0.knowsheet.local/viz.png?key=%lf", t)});
     }
   };
 
@@ -414,8 +590,32 @@ int main() {
     }
   });
 
-  // Lorempixel images.
-  HTTP(port).ServeStaticFilesFrom("lorempixel", "/lorempixel/");
+  // Images are now generated by the `Cruncher`. -- D.K.
+  if (false) {
+    // Lorempixel images.
+    // HTTP(port).ServeStaticFilesFrom("lorempixel", "/lorempixel/");
+    HTTP(port).Register("/viz.png", [](Request r) {
+      using namespace bricks::gnuplot;
+      const auto f = [](Plotter& p) {
+        const int N = 7;
+        for (int i = 0; i < N; ++i) {
+          const double phi = M_PI * 2 * i / N;
+          p(cos(phi), sin(phi), bricks::strings::Printf("P%d", i));
+        }
+      };
+      // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
+      r(GNUPlot()
+            .TermSize(400, 400)
+            .NoTitle()
+            .NoKey()
+            .NoTics()
+            .NoBorder()
+            .Plot(WithMeta(f).AsLabels())
+            .OutputFormat("pngcairo"),
+        HTTPResponseCode.OK,
+        "image/png");
+    });
+  }
 
   // Landing page.
   const std::string dir = "static/";
