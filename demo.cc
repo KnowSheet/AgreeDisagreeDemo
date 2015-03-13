@@ -299,18 +299,18 @@ struct Controller {
     const auto bubble = db->DoAddQuestion("We are in the bubble.", Now() - MILLISECONDS_INTERVAL(2500)).qid;
     const auto movies = db->DoAddQuestion("Movies are getting worse.", Now() - MILLISECONDS_INTERVAL(1500)).qid;
 
-    db->DoAddAnswer("dima", vi, schema::ANSWER::YES, Now());
-    db->DoAddAnswer("dima", weed, schema::ANSWER::YES, Now());
-    db->DoAddAnswer("dima", bubble, schema::ANSWER::NO, Now());
-    db->DoAddAnswer("dima", movies, schema::ANSWER::YES, Now());
-    db->DoAddAnswer("alice", vi, schema::ANSWER::NO, Now());
-    db->DoAddAnswer("alice", weed, schema::ANSWER::NO, Now());
-    db->DoAddAnswer("bob", movies, schema::ANSWER::NO, Now());
-    db->DoAddAnswer("bob", bubble, schema::ANSWER::YES, Now());
-    db->DoAddAnswer("charles", vi, schema::ANSWER::NO, Now());
-    db->DoAddAnswer("charles", weed, schema::ANSWER::NO, Now());
-    db->DoAddAnswer("charles", bubble, schema::ANSWER::YES, Now());
-    db->DoAddAnswer("charles", movies, schema::ANSWER::NO, Now());
+    db->DoAddAnswer("dima", vi, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("dima", weed, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("dima", bubble, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("dima", movies, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("alice", vi, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("alice", weed, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("bob", movies, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("bob", bubble, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("charles", vi, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("charles", weed, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("charles", bubble, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("charles", movies, schema::ANSWER::DISAGREE, Now());
   }
 
   void Actions(Request r) {
