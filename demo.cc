@@ -140,7 +140,7 @@ class Cruncher final {
     HTTP(port).Register(
         "/" + demo_id_ + "/",
         new bricks::net::api::StaticFileServer(
-            bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "dashboard.html")),
+            bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "index.html")),
             "text/html"));
   }
 
@@ -401,7 +401,7 @@ int main() {
   HTTP(port).Register(
       "/",
       new bricks::net::api::StaticFileServer(
-          bricks::FileSystem::ReadFileAsString(FileSystem::JoinPath(dir, "index.html")), "text/html"));
+          bricks::FileSystem::ReadFileAsString(FileSystem::JoinPath(dir, "landing.html")), "text/html"));
 
   // Run forever.
   HTTP(port).Join();
