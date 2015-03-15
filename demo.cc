@@ -218,12 +218,14 @@ class Cruncher final {
     const std::string& demo_id_;
     Box box_;
 
-    std::string current_image_ = "NO DATA YET\n";
+    std::string current_image_;
     sherlock::StreamInstance<VizPoint<std::string>>& image_stream_;
 
     Consumer() = delete;
     Consumer(const std::string& demo_id, sherlock::StreamInstance<VizPoint<std::string>>& image_stream)
-        : demo_id_(demo_id), image_stream_(image_stream) {}
+        : demo_id_(demo_id), current_image_(RegenerateImage(box_)), image_stream_(image_stream) {
+      UpdateImageOnTheDashboard();
+    }
 
     inline void OnMessage(std::unique_ptr<schema::Base>& message, size_t) {
       struct types {
@@ -333,78 +335,79 @@ class Cruncher final {
         size_t& N = static_data.N;
         std::vector<std::vector<size_t>>& M = static_data.M;
 
+        const double t = static_cast<double>(bricks::time::Now());
         std::cerr << "Optimizing.\n";
 
+        data.clear();
+
         N = box.users.size();
-        std::map<std::string, size_t> uid_remap;
-        for (size_t i = 0; i < N; ++i) {
-          uid_remap[box.users[i]] = i;
-        }
 
-        M = std::vector<std::vector<size_t>>(N, std::vector<size_t>(N, 0));
-
-        for (const auto qit : box.answers) {
-          std::vector<std::string> clusters[2];  // Disagree, Agree.
-          for (const auto uit : qit.second) {
-            if (uit.second == schema::ANSWER::DISAGREE) {
-              clusters[0].push_back(uit.first);
-            } else if (uit.second == schema::ANSWER::AGREE) {
-              clusters[1].push_back(uit.first);
-            }
+        if (N) {
+          std::map<std::string, size_t> uid_remap;
+          for (size_t i = 0; i < N; ++i) {
+            uid_remap[box.users[i]] = i;
           }
-          if (!clusters[0].empty() && !clusters[1].empty()) {
-            for (const auto& cit1 : clusters[0]) {
-              for (const auto& cit2 : clusters[1]) {
-                ++M[uid_remap[cit1]][uid_remap[cit2]];
-                ++M[uid_remap[cit2]][uid_remap[cit1]];
+
+          M = std::vector<std::vector<size_t>>(N, std::vector<size_t>(N, 0));
+
+          for (const auto qit : box.answers) {
+            std::vector<std::string> clusters[2];  // Disagree, Agree.
+            for (const auto uit : qit.second) {
+              if (uit.second == schema::ANSWER::DISAGREE) {
+                clusters[0].push_back(uit.first);
+              } else if (uit.second == schema::ANSWER::AGREE) {
+                clusters[1].push_back(uit.first);
+              }
+            }
+            if (!clusters[0].empty() && !clusters[1].empty()) {
+              for (const auto& cit1 : clusters[0]) {
+                for (const auto& cit2 : clusters[1]) {
+                  ++M[uid_remap[cit1]][uid_remap[cit2]];
+                  ++M[uid_remap[cit2]][uid_remap[cit1]];
+                }
               }
             }
           }
-        }
 
-        std::vector<double> x;
-        for (size_t i = 0; i < N; ++i) {
-          const double phi = M_PI * 2 * i / N;
-          x.push_back(cos(phi));
-          x.push_back(sin(phi));
-        }
-
-        for (size_t i = 0; i < N; ++i) {
-          std::cerr << bricks::strings::Printf("P0 = { %+.3lf, %+.3lf }\n", x[i * 2], x[i * 2 + 1]);
-        }
-
-        fncas::OptimizerParameters params;
-        params.SetValue("max_steps", 50);
-        const auto result = fncas::ConjugateGradientOptimizer<StaticFunctionData>(params).Optimize(x);
-
-        x = result.point;
-        for (size_t i = 0; i < N; ++i) {
-          std::cerr << bricks::strings::Printf("P1 = { %+.3lf, %+.3lf }\n", x[i * 2], x[i * 2 + 1]);
-        }
-
-        for (size_t i = 0; i < N; ++i) {
-          std::cerr << bricks::strings::Printf("%10s", box.users[i].c_str());
-          for (size_t j = 0; j < N; ++j) {
-            std::cerr << ' ' << M[i][j];
+          std::vector<double> x;
+          for (size_t i = 0; i < N; ++i) {
+            const double phi = M_PI * 2 * i / N;
+            x.push_back(cos(phi));
+            x.push_back(sin(phi));
           }
-          std::cerr << std::endl;
-        }
 
-        data.clear();
-        for (size_t i = 0; i < N; ++i) {
-          // const double phi = M_PI * 2 * i / N;
-          // data.push_back(OutputPoint{cos(phi), sin(phi), box.users[i]});
-          data.push_back(OutputPoint{x[i * 2], x[i * 2 + 1], box.users[i]});
+          for (size_t i = 0; i < N; ++i) {
+            std::cerr << bricks::strings::Printf("P0 = { %+.3lf, %+.3lf }\n", x[i * 2], x[i * 2 + 1]);
+          }
+
+          fncas::OptimizerParameters params;
+          params.SetValue("max_steps", 50);
+          const auto result = fncas::ConjugateGradientOptimizer<StaticFunctionData>(params).Optimize(x);
+
+          x = result.point;
+          for (size_t i = 0; i < N; ++i) {
+            std::cerr << bricks::strings::Printf("P1 = { %+.3lf, %+.3lf }\n", x[i * 2], x[i * 2 + 1]);
+          }
+
+          for (size_t i = 0; i < N; ++i) {
+            std::cerr << bricks::strings::Printf("%10s", box.users[i].c_str());
+            for (size_t j = 0; j < N; ++j) {
+              std::cerr << ' ' << M[i][j];
+            }
+            std::cerr << std::endl;
+          }
+
+          for (size_t i = 0; i < N; ++i) {
+            data.push_back(OutputPoint{x[i * 2], x[i * 2 + 1], box.users[i]});
+          }
         }
-        std::cerr << "Optimizing: Done.\n";
+        std::cerr << bricks::strings::Printf("Optimization took %.2lf seconds.\n",
+                                             1e-3 * (static_cast<double>(bricks::time::Now()) - t));
       }
     };
 
-    void UpdateVisualization() {
-      const double t = static_cast<double>(bricks::time::Now());
-      bricks::Singleton<StaticFunctionData>().Update(box_);
-      std::cerr << bricks::strings::Printf("Optimization took %.2lf seconds.\n",
-                                           1e-3 * (static_cast<double>(bricks::time::Now()) - t));
+    static std::string RegenerateImage(const Box& box) {
+      bricks::Singleton<StaticFunctionData>().Update(box);
 
       using namespace bricks::gnuplot;
       const auto f = [](Plotter& p) {
@@ -415,15 +418,24 @@ class Cruncher final {
       };
 
       // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
-      current_image_ = GNUPlot()
-                           .TermSize(400, 400)
-                           .NoTitle()
-                           .NoKey()
-                           .NoTics()
-                           .NoBorder()
-                           .Plot(WithMeta(f).AsLabels())
-                           .OutputFormat("pngcairo");
+      return GNUPlot()
+          .TermSize(400, 400)
+          .NoTitle()
+          .NoKey()
+          .NoTics()
+          .NoBorder()
+          .Plot(WithMeta(f).AsLabels())
+          .OutputFormat("pngcairo");
+    }
+
+    void UpdateImageOnTheDashboard() {
+      const double t = static_cast<double>(bricks::time::Now());
       image_stream_.Publish(VizPoint<std::string>{t, Printf("http://d0.knowsheet.local/viz.png?key=%lf", t)});
+    }
+
+    void UpdateVisualization() {
+      current_image_ = RegenerateImage(box_);
+      UpdateImageOnTheDashboard();
     }
   };
 
