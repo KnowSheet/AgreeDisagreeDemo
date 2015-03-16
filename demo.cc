@@ -419,7 +419,7 @@ class Cruncher final {
 
       // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
       return GNUPlot()
-          .TermSize(400, 400)
+          .ImageSize(400, 400)
           .NoTitle()
           .NoKey()
           .NoTics()
@@ -617,7 +617,7 @@ int main() {
       };
       // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
       r(GNUPlot()
-            .TermSize(400, 400)
+            .ImageSize(400, 400)
             .NoTitle()
             .NoKey()
             .NoTics()
