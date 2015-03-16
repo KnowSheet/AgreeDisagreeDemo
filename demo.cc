@@ -149,8 +149,6 @@ class Cruncher final {
       });
 
       // Need a dedicated handler for '$DEMO_ID/' to serve the nicely looking dashboard.
-      // WARNING! WARNING! WARNING! Removing the old handler is a temporary hack! -- D.K.
-      HTTP(port).UnRegister("/");
       HTTP(port).Register(
           "/" + demo_id_ + "/",
           new bricks::net::api::StaticFileServer(
