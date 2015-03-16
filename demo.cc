@@ -156,7 +156,7 @@ class Cruncher final {
               "text/html"));
 
       HTTP(port)
-          .Register("/viz.png", [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
+          .Register("/" + demo_id_ + "/layout/d/image_data/viz.png", [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
     } catch (const bricks::Exception& e) {
       std::cerr << "Crunched constructor exception: " << e.What() << std::endl;
       throw;
@@ -428,7 +428,8 @@ class Cruncher final {
 
     void UpdateImageOnTheDashboard() {
       const double t = static_cast<double>(bricks::time::Now());
-      image_stream_.Publish(VizPoint<std::string>{t, Printf("http://d0.knowsheet.local/viz.png?key=%lf", t)});
+      // The image URL is relative to the data URL.
+      image_stream_.Publish(VizPoint<std::string>{t, Printf("/viz.png?key=%lf", t)});
     }
 
     void UpdateVisualization() {
