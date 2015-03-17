@@ -60,6 +60,7 @@ struct VizPoint {
   void serialize(A& ar) {
     ar(CEREAL_NVP(x), CEREAL_NVP(y));
   }
+  EPOCH_MILLISECONDS ExtractTimestamp() const { return static_cast<EPOCH_MILLISECONDS>(x); }
 };
 
 // The `Box` structure encapsulates the state of the demo.
