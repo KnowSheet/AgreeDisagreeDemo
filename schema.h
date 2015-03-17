@@ -40,6 +40,10 @@ enum class QID : size_t { NONE = 0 };                           // Question ID, 
 enum class ANSWER : int { DISAGREE = -1, NA = 0, AGREE = +1 };  // Answer, one of { AGREE, DISAGREE, NA }.
 
 struct Base {
+  virtual bricks::time::EPOCH_MILLISECONDS ExtractTimestamp() const {
+    // TODO(dkorolev): Something smarter.
+    throw false;
+  }
   virtual ~Base() = default;
   template <typename A>
   void serialize(A&) {}
@@ -52,6 +56,7 @@ struct Record : Base {
     Base::serialize(ar);
     ar(CEREAL_NVP(ms));
   }
+  virtual bricks::time::EPOCH_MILLISECONDS ExtractTimestamp() const override { return ms; }
 };
 
 struct UserRecord : Record {

@@ -60,6 +60,7 @@ struct VizPoint {
   void serialize(A& ar) {
     ar(CEREAL_NVP(x), CEREAL_NVP(y));
   }
+  EPOCH_MILLISECONDS ExtractTimestamp() const { return static_cast<EPOCH_MILLISECONDS>(x); }
 };
 
 // The `Box` structure encapsulates the state of the demo.
@@ -419,7 +420,7 @@ class Cruncher final {
 
       // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
       return GNUPlot()
-          .TermSize(400, 400)
+          .ImageSize(400, 400)
           .NoTitle()
           .NoKey()
           .NoTics()
@@ -617,7 +618,7 @@ int main() {
       };
       // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
       r(GNUPlot()
-            .TermSize(400, 400)
+            .ImageSize(400, 400)
             .NoTitle()
             .NoKey()
             .NoTics()
