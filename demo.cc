@@ -89,12 +89,11 @@ class Cruncher final {
         consumer_(demo_id_, image_),
         mq_(consumer_),
         metronome_thread_(&Cruncher::Metronome, this) {
-    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
     try {
       // Data streams.
-      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/u_total_data", u_total_);
-      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/q_total_data", q_total_);
-      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/d/image_data", image_);
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/u_total_data", u_total_);
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/q_total_data", q_total_);
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/image_data", image_);
 
       // The visualization comes from `Consumer`/`Cruncher`, as well as the updates to this stream.
       if (false) {
@@ -115,33 +114,34 @@ class Cruncher final {
       }
 
       // The black magic of serving the dashboard.
-      HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), /* "/" + demo_id_ + */ "/static/");
+      HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), "/" + demo_id_ + "/static/");
 
-      HTTP(port).Register(/*"/" + demo_id_* + */ "/config", [this](Request r) {
-        r(dashboard::Config("layout"), "config");  // URL relative to `config`.
+      HTTP(port).Register("/" + demo_id_ + "/config", [this](Request r) {
+        // The layout URL is an absolute URL, not relative to the config URL.
+        r(dashboard::Config("/" + demo_id_ + "/layout"), "config");
       });
 
-      HTTP(port).Register(/*"/" + demo_id_ + */ "/layout", [](Request r) {
+      HTTP(port).Register("/" + demo_id_ + "/layout", [](Request r) {
         using namespace dashboard::layout;
         // `/meta` URL-s are relative to `/layout`.
         r(Layout(Row({Col({Cell("/q_total_meta"), Cell("/u_total_meta")}), Cell("/image_meta")})), "layout");
       });
 
-      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/u_total_meta", [this](Request r) {
+      HTTP(port).Register("/" + demo_id_ + "/layout/u_total_meta", [this](Request r) {
         auto meta = dashboard::PlotMeta();
         meta.options.caption = "Total users.";
         meta.data_url = "/d/u_total_data";
         r(meta, "meta");
       });
 
-      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/q_total_meta", [this](Request r) {
+      HTTP(port).Register("/" + demo_id_ + "/layout/q_total_meta", [this](Request r) {
         auto meta = dashboard::PlotMeta();
         meta.options.caption = "Total questions.";
         meta.data_url = "/d/q_total_data";
         r(meta, "meta");
       });
 
-      HTTP(port).Register(/* "/" + demo_id_ + */ "/layout/image_meta", [this](Request r) {
+      HTTP(port).Register("/" + demo_id_ + "/layout/image_meta", [this](Request r) {
         auto meta = dashboard::ImageMeta();
         meta.options.header_text = "Users' Agreement";
         meta.data_url = "/d/image_data";
@@ -149,16 +149,14 @@ class Cruncher final {
       });
 
       // Need a dedicated handler for '$DEMO_ID/' to serve the nicely looking dashboard.
-      // WARNING! WARNING! WARNING! Removing the old handler is a temporary hack! -- D.K.
-      HTTP(port).UnRegister("/");
       HTTP(port).Register(
-          /* "/" + demo_id_ + */ "/",
+          "/" + demo_id_ + "/",
           new bricks::net::api::StaticFileServer(
               bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "index.html")),
               "text/html"));
 
       HTTP(port)
-          .Register("/viz.png", [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
+          .Register("/" + demo_id_ + "/layout/d/image_data/viz.png", [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
     } catch (const bricks::Exception& e) {
       std::cerr << "Crunched constructor exception: " << e.What() << std::endl;
       throw;
@@ -419,7 +417,7 @@ class Cruncher final {
 
       // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
       return GNUPlot()
-          .TermSize(400, 400)
+          .ImageSize(400, 400)
           .NoTitle()
           .NoKey()
           .NoTics()
@@ -430,7 +428,8 @@ class Cruncher final {
 
     void UpdateImageOnTheDashboard() {
       const double t = static_cast<double>(bricks::time::Now());
-      image_stream_.Publish(VizPoint<std::string>{t, Printf("http://d0.knowsheet.local/viz.png?key=%lf", t)});
+      // The image URL is relative to the data URL.
+      image_stream_.Publish(VizPoint<std::string>{t, Printf("/viz.png?key=%lf", t)});
     }
 
     void UpdateVisualization() {
@@ -480,16 +479,14 @@ struct Controller {
         cruncher_(port_, demo_id_),
         scope_(db_->Subscribe(cruncher_)) {
     // The main controller page.
-    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
     HTTP(port_)
-        .Register(/* "/" + demo_id_ + */ "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
-    HTTP(port).Register(/* "/" + demo_id_ + */ "/a", [this](Request r) {
-      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", /* "/" + demo_id_ + */ "/a/"));
+        .Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
+    HTTP(port).Register("/" + demo_id_ + "/a", [this](Request r) {
+      r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id_ + "/a/"));
     });
 
     // Make the storage-level stream accessible to the outer world via PubSub.
-    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
-    HTTP(port_).Register(/* "/" + demo_id_ + */ "/a/raw", std::ref(*db_));
+    HTTP(port_).Register("/" + demo_id_ + "/a/raw", std::ref(*db_));
 
     // Pre-populate a few users, questions and answers to start from.
     db->DoAddUser("dima", Now() - MILLISECONDS_INTERVAL(5000));
@@ -590,9 +587,7 @@ int main() {
         auto demo = new db::Storage(port, demo_id);             // Lives forever. -- D.K.
         auto controller = new Controller(port, demo_id, demo);  // Lives forever. -- D.K.
         static_cast<void>(controller);
-        // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
-        // r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id + "/a/"));
-        r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/a/"));
+        r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id + "/a/"));
       } catch (const bricks::Exception& e) {
         std::cerr << "Demo creation exception: " << e.What() << std::endl;
         throw;
@@ -617,7 +612,7 @@ int main() {
       };
       // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
       r(GNUPlot()
-            .TermSize(400, 400)
+            .ImageSize(400, 400)
             .NoTitle()
             .NoKey()
             .NoTics()
