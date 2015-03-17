@@ -39,7 +39,7 @@ namespace dashboard {
 struct Config {
   const std::string layout_url;
 
-  // TODO(dkorolev): Multiple production sub-domains should be listed here.
+  // The list of domains that resolve to the backend which serves the layout and streams.
   std::vector<std::string> data_hostnames;
 
   // The static template.
@@ -49,11 +49,10 @@ struct Config {
       : layout_url(layout_url),
         dashboard_template(
             bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "template.html"))) {
-    // TODO(dkorolev)+TODO(sompylasar): Resolve absolute + relative paths troubles when hostname changes.
+    // TODO(dkorolev): Multiple production sub-domains should be listed here.
     for (int i = 0; i < 10; ++i) {
       data_hostnames.push_back(bricks::strings::Printf("d%d.knowsheet.local", i));
     }
-    // Note: This implemenation assumes port 80 is routed to 3000. -- D.K.
   }
 
   template <typename A>
