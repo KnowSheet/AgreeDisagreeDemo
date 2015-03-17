@@ -57,30 +57,28 @@ class Storage final {
         sherlock_stream_(sherlock::Stream<std::unique_ptr<schema::Base>>(client_name + "_db", "record")),
         questions_({schema::QuestionRecord()}),
         questions_reverse_index_({""}) {
-    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
-    // HTTP(port_).Register("/" + client_name_, [](Request r) { r("OK\n"); });
+    HTTP(port_).Register("/" + client_name_, [](Request r) { r("OK\n"); });
     HTTP(port_)
-        .Register(/* "/" + client_name_ + */ "/q", std::bind(&Storage::HandleQ, this, std::placeholders::_1));
+        .Register("/" + client_name_ + "/q", std::bind(&Storage::HandleQ, this, std::placeholders::_1));
     HTTP(port_)
-        .Register(/* "/" + client_name_ + */ "/u", std::bind(&Storage::HandleU, this, std::placeholders::_1));
+        .Register("/" + client_name_ + "/u", std::bind(&Storage::HandleU, this, std::placeholders::_1));
     // TODO(dkorolev): POST "/a"?
-    HTTP(port_).Register(/* "/" + client_name_ + */ "/a/add_question",
+    HTTP(port_).Register("/" + client_name_ + "/a/add_question",
                          std::bind(&Storage::HandleAddQ, this, std::placeholders::_1));
-    HTTP(port_).Register(/* "/" + client_name_ + */ "/a/add_user",
+    HTTP(port_).Register("/" + client_name_ + "/a/add_user",
                          std::bind(&Storage::HandleAddU, this, std::placeholders::_1));
-    HTTP(port_).Register(/* "/" + client_name_ + */ "/a/add_answer",
+    HTTP(port_).Register("/" + client_name_ + "/a/add_answer",
                          std::bind(&Storage::HandleAddA, this, std::placeholders::_1));
   }
 
   // Unregisters HTTP endpoints.
   ~Storage() {
-    // TODO(dkorolev) + TODO(sompylasar): Resolve relative paths.
-    // HTTP(port_).UnRegister("/" + client_name_);
-    HTTP(port_).UnRegister(/* "/" + client_name_ + */ "/q");
-    HTTP(port_).UnRegister(/* "/" + client_name_ + */ "/u");
-    HTTP(port_).UnRegister(/* "/" + client_name_ + */ "/a/add_question");
-    HTTP(port_).UnRegister(/* "/" + client_name_ + */ "/a/add_user");
-    HTTP(port_).UnRegister(/* "/" + client_name_ + */ "/a/add_answer");
+    HTTP(port_).UnRegister("/" + client_name_);
+    HTTP(port_).UnRegister("/" + client_name_ + "/q");
+    HTTP(port_).UnRegister("/" + client_name_ + "/u");
+    HTTP(port_).UnRegister("/" + client_name_ + "/a/add_question");
+    HTTP(port_).UnRegister("/" + client_name_ + "/a/add_user");
+    HTTP(port_).UnRegister("/" + client_name_ + "/a/add_answer");
   }
 
   // Sherlock stream access.
