@@ -118,8 +118,37 @@ class Cruncher final {
       HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), "/" + demo_id_ + "/static/");
 
       HTTP(port).Register("/" + demo_id_ + "/config", [this](Request r) {
+        // Read the file once.
+        static const std::string dashboard_template = bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "template.html"));
+        // Build the placeholder replacements.
+        std::map<std::string, std::string> replacement_map = {
+          // Custom style tags in the `<head>`, if needed.
+          {"<style id=\"knsh-dashboard-style-placeholder\"></style>", ""},
+          // Header columns between the logo and the GitHub link.
+          {
+            "<div class=\"knsh-columns__item\" id=\"knsh-header-columns-placeholder\"></div>",
+            "<div class=\"knsh-columns__item\" style=\"text-align: right;\">"
+              "<a href=\"/" + demo_id_ + "/a/\" class=\"knsh-header-link\"><span>Back to demo</span></a>"
+            "</div>"
+          },
+          // Footer columns between the copyright and the GitHub link.
+          {"<div class=\"knsh-columns__item\" id=\"knsh-footer-columns-placeholder\"></div>", ""},
+          // Anything to put above the generated dashboard.
+          {"<div id=\"knsh-dashboard-before-placeholder\"></div>", ""},
+          // Anything to put below the generated dashboard.
+          {"<div id=\"knsh-dashboard-after-placeholder\"></div>", ""}
+        };
+        // Replace the placeholders with the replacements.
+        std::string dashboard_template_output = dashboard_template;
+        for (const auto& kv : replacement_map) {
+          std::size_t pos = 0;
+          while (std::string::npos != (pos = dashboard_template_output.find(kv.first, pos))) {
+            dashboard_template_output.replace(pos, kv.first.length(), kv.second);
+            pos += kv.second.length();
+          }
+        }
         // The layout URL is an absolute URL, not relative to the config URL.
-        r(dashboard::Config("/" + demo_id_ + "/layout"), "config");
+        r(dashboard::Config("/" + demo_id_ + "/layout", dashboard_template_output), "config");
       });
 
       HTTP(port).Register("/" + demo_id_ + "/layout", [](Request r) {
