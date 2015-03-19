@@ -69,7 +69,7 @@ struct PlotMeta {
     // double max = 25;
     double time_interval = 20000;
     size_t n_min = 2;
-    
+
     template <typename A>
     void save(A& ar) const {
       // TODO(dkorolev): Make serialization of `min/max` conditional on their equality.
@@ -99,11 +99,10 @@ struct ImageMeta {
     std::string empty_text = "Loading...";
     double time_interval = 10000;
     size_t n_min = 1;
-    
+
     template <typename A>
     void save(A& ar) const {
-      ar(CEREAL_NVP(header_text), CEREAL_NVP(empty_text), CEREAL_NVP(time_interval),
-          CEREAL_NVP(n_min));
+      ar(CEREAL_NVP(header_text), CEREAL_NVP(empty_text), CEREAL_NVP(time_interval), CEREAL_NVP(n_min));
     }
   };
 
