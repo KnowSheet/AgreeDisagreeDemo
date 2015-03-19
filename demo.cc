@@ -481,7 +481,7 @@ struct Controller {
         scope_(db_->Subscribe(cruncher_)) {
     // The main controller page.
     HTTP(port_).Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
-    HTTP(port).Register("/" + demo_id_ + "/a", [this](Request r) {
+    HTTP(port_).Register("/" + demo_id_ + "/a", [this](Request r) {
       r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id_ + "/a/"));
     });
 
