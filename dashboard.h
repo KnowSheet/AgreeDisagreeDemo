@@ -68,7 +68,7 @@ struct PlotMeta {
     // double min = -5;
     // double max = 25;
     double time_interval = 20000;
-    int n_min = 2;
+    size_t n_min = 2;
     
     template <typename A>
     void save(A& ar) const {
@@ -98,7 +98,7 @@ struct ImageMeta {
     std::string header_text = "<CAPTION>";
     std::string empty_text = "Loading...";
     double time_interval = 10000;
-    int n_min = 1;
+    size_t n_min = 1;
     
     template <typename A>
     void save(A& ar) const {
