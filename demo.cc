@@ -185,8 +185,8 @@ class Cruncher final {
               bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "index.html")),
               "text/html"));
 
-      HTTP(port)
-          .Register("/" + demo_id_ + "/layout/d/image_data/viz.png", [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/image_data/viz.png",
+                          [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
     } catch (const bricks::Exception& e) {
       std::cerr << "Crunched constructor exception: " << e.What() << std::endl;
       throw;
@@ -509,9 +509,8 @@ struct Controller {
         cruncher_(port_, demo_id_),
         scope_(db_->Subscribe(cruncher_)) {
     // The main controller page.
-    HTTP(port_)
-        .Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
-    HTTP(port).Register("/" + demo_id_ + "/a", [this](Request r) {
+    HTTP(port_).Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + demo_id_ + "/a", [this](Request r) {
       r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id_ + "/a/"));
     });
 

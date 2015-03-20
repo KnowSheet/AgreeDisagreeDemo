@@ -58,10 +58,8 @@ class Storage final {
         questions_({schema::QuestionRecord()}),
         questions_reverse_index_({""}) {
     HTTP(port_).Register("/" + client_name_, [](Request r) { r("OK\n"); });
-    HTTP(port_)
-        .Register("/" + client_name_ + "/q", std::bind(&Storage::HandleQ, this, std::placeholders::_1));
-    HTTP(port_)
-        .Register("/" + client_name_ + "/u", std::bind(&Storage::HandleU, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/q", std::bind(&Storage::HandleQ, this, std::placeholders::_1));
+    HTTP(port_).Register("/" + client_name_ + "/u", std::bind(&Storage::HandleU, this, std::placeholders::_1));
     // TODO(dkorolev): POST "/a"?
     HTTP(port_).Register("/" + client_name_ + "/a/add_question",
                          std::bind(&Storage::HandleAddQ, this, std::placeholders::_1));
