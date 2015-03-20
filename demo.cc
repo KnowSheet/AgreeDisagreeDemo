@@ -40,6 +40,7 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 #include "../Bricks/net/api/api.h"
 #include "../Bricks/mq/inmemory/mq.h"
 #include "../Bricks/graph/gnuplot.h"
+#include "../Bricks/waitable_atomic/waitable_atomic.h"
 #include "../Bricks/dflags/dflags.h"
 #include "../Bricks/util/singleton.h"
 #include "../fncas/fncas/fncas.h"
@@ -48,10 +49,10 @@ DEFINE_int32(port, 3000, "Local port to use.");
 
 using bricks::FileSystem;
 using bricks::strings::Printf;
+using bricks::WaitableAtomic;
 using bricks::time::Now;
 using bricks::time::EPOCH_MILLISECONDS;
 using bricks::time::MILLISECONDS_INTERVAL;
-
 template <typename Y>
 struct VizPoint {
   double x;
@@ -89,30 +90,12 @@ class Cruncher final {
         image_(sherlock::Stream<VizPoint<std::string>>(demo_id_ + "_image", "point")),
         consumer_(demo_id_, image_),
         mq_(consumer_),
-        metronome_thread_(&Cruncher::Metronome, this) {
+        metronome_thread_(&Cruncher::MetronomeThread, this) {
     try {
       // Data streams.
       HTTP(port).Register("/" + demo_id_ + "/layout/d/u_total_data", u_total_);
       HTTP(port).Register("/" + demo_id_ + "/layout/d/q_total_data", q_total_);
       HTTP(port).Register("/" + demo_id_ + "/layout/d/image_data", image_);
-
-      // The visualization comes from `Consumer`/`Cruncher`, as well as the updates to this stream.
-      if (false) {
-        // TODO(dkorolev): This, of course, will be refactored. -- D.K.
-        std::thread([this]() {
-                      int index = 0;
-                      while (true) {
-                        // Note that in order for the `http://d0.knowsheet.local/...` URL-s to work,
-                        // 1) `d0.knowsheet.local` should point to `localhost` in `/etc/hosts`, and
-                        // 2) Port 80 should be forwarded (or the demo should run on it).
-                        image_.Publish(VizPoint<std::string>{
-                            static_cast<double>(bricks::time::Now()),
-                            Printf("http://d0.knowsheet.local/lorempixel/%d.jpg", index + 1)});
-                        index = (index + 1) % 10;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                      }
-                    }).detach();
-      }
 
       // The black magic of serving the dashboard.
       HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), "/" + demo_id_ + "/static/");
@@ -246,14 +229,29 @@ class Cruncher final {
     const std::string& demo_id_;
     Box box_;
 
-    std::string current_image_;
+    // Syncronization between the consumer thread that the thread that updates models and images
+    // is done via a lockable and waitable object.
+    struct Visualization {
+      // Increment this index to initiate model and image refresh.
+      size_t requested = 0;
+      // This index is either equal to `requested` ("caught up") or is less than it ("behind").
+      size_t done = 0;
+      // Copy of the data to generate the image for.
+      Box box;
+      // The image that is currently on display.
+      std::string image = "";
+    };
+    WaitableAtomic<Visualization> visualization_;
+
     sherlock::StreamInstance<VizPoint<std::string>>& image_stream_;
+
+    std::thread visualization_thread_;
 
     Consumer() = delete;
     Consumer(const std::string& demo_id, sherlock::StreamInstance<VizPoint<std::string>>& image_stream)
-        : demo_id_(demo_id), current_image_(RegenerateImage(box_)), image_stream_(image_stream) {
-      UpdateImageOnTheDashboard();
-    }
+        : demo_id_(demo_id),
+          image_stream_(image_stream),
+          visualization_thread_(&Consumer::UpdateVisualizationThread, this) {}
 
     inline void OnMessage(std::unique_ptr<schema::Base>& message, size_t) {
       struct types {
@@ -276,7 +274,7 @@ class Cruncher final {
     inline void operator()(schema::UserRecord& u) {
       std::cerr << '@' << demo_id_ << " +U: " << u.uid << '\n';
       box_.users.push_back(u.uid);
-      UpdateVisualization();
+      TriggerVisualizationUpdate();
     }
 
     inline void operator()(schema::QuestionRecord& q) {
@@ -288,7 +286,7 @@ class Cruncher final {
       std::cerr << '@' << demo_id_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
                 << static_cast<size_t>(a.qid) << '\n';
       box_.answers[a.qid][a.uid] = a.answer;
-      UpdateVisualization();
+      TriggerVisualizationUpdate();
     }
 
     inline void operator()(FunctionMQMessage& message) { message.function_with_box(box_); }
@@ -298,7 +296,13 @@ class Cruncher final {
     }
 
     inline void operator()(VizMQMessage& message) {
-      message.request(current_image_, HTTPResponseCode.OK, "image/png");
+      // Retrieve the current images, read-lock-protected, no external notifications.
+      const std::string image = visualization_.ImmutableScopedAccessor()->image;
+      if (!image.empty()) {
+        message.request(image, HTTPResponseCode.OK, "image/png");
+      } else {
+        message.request("Not ready yet.", HTTPResponseCode.BadRequest, "text/plain");
+      }
     }
 
     inline void operator()(TickMQMessage& message) {
@@ -461,20 +465,41 @@ class Cruncher final {
           .OutputFormat("pngcairo");
     }
 
-    void UpdateImageOnTheDashboard() {
-      const double t = static_cast<double>(bricks::time::Now());
-      // The image URL is relative to the data URL.
-      image_stream_.Publish(VizPoint<std::string>{t, Printf("/viz.png?key=%lf", t)});
+    void TriggerVisualizationUpdate() {
+      visualization_.MutableUse([this](Visualization& visualization) {
+        // Make a copy the `box_` to work with.
+        // And signal the image update thread that it now has a job.
+        visualization.box = box_;
+        ++visualization.requested;
+      });
     }
 
-    void UpdateVisualization() {
-      current_image_ = RegenerateImage(box_);
-      UpdateImageOnTheDashboard();
+    // The thread in which model and visualizations updates are run. Objectives:
+    // 1) Don't block the main thread while the model+visualization are being updated,
+    // 2) Skip intermediate models, if user action(s) happen faster than the model is updated.
+    void UpdateVisualizationThread() {
+      while (true) {
+        // Patiently wait for new user-generated data to update the model+visualization.
+        visualization_.Wait([](const Visualization& v) { return v.done < v.requested; });
+        // Work with the copy of the box.
+        Visualization copy = *visualization_.ImmutableScopedAccessor();
+        std::cerr << "Starting to process request " << copy.requested << std::endl;
+        const double timestamp = static_cast<double>(bricks::time::Now());
+        const std::string image = RegenerateImage(copy.box);
+        visualization_.MutableUse([&copy, &image](Visualization& v) {
+          v.image = image;
+          // Update to the `requested` version which was actually processed.
+          // This is the most concurrency-safe solution.
+          v.done = copy.requested;
+          std::cerr << "Processed request " << copy.requested << std::endl;
+        });
+        image_stream_.Publish(VizPoint<std::string>{timestamp, Printf("/viz.png?key=%lf", timestamp)});
+      }
     }
   };
 
   // TODO(dkorolev): There should probably be a better, more Bricks-standard way to make use of a metronome.
-  void Metronome() {
+  void MetronomeThread() {
     const MILLISECONDS_INTERVAL period = static_cast<MILLISECONDS_INTERVAL>(250);
     EPOCH_MILLISECONDS now = Now();
     while (true) {
