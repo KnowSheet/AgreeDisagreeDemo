@@ -65,7 +65,7 @@ struct PlotMeta {
     std::string color = "blue";
     // double min = -5;
     // double max = 25;
-    double time_interval = 20000;
+    double time_interval = 30000;
     size_t n_min = 2;
 
     template <typename A>
@@ -95,7 +95,7 @@ struct ImageMeta {
   struct Options {
     std::string header_text = "<CAPTION>";
     std::string empty_text = "Loading...";
-    double time_interval = 10000;
+    double time_interval = 60000;  //  Although "1" should work here. -- D.K.
     size_t n_min = 1;
 
     template <typename A>
