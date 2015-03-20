@@ -209,7 +209,9 @@ class Cruncher final {
     TickMQMessage(stream_type& u, stream_type& p) : p_u_total(u), p_q_total(p) {}
   };
 
-  inline bool Entry(std::unique_ptr<schema::Base>& entry) {
+  inline bool Entry(std::unique_ptr<schema::Base>& entry, size_t index, size_t total) {
+    static_cast<void>(index);
+    static_cast<void>(total);
     // Note: The following call transfers ownership away from the passed in `unique_ptr`
     // into the `unique_ptr` in the message queue.
     // Looks straighforward to me after refactoring everything around it, yet comments and very welcome. -- D.K.
