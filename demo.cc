@@ -24,6 +24,8 @@ SOFTWARE.
 
 #include "../Bricks/port.h"
 
+#include <queue>
+
 #include "schema.h"
 #include "db.h"
 #include "dashboard.h"
@@ -72,6 +74,28 @@ struct Box {
   std::map<schema::QID, std::map<schema::UID, schema::ANSWER>> answers;
 };
 
+struct TimeWindowTracker {
+  const double w_;
+  std::queue<double> q_;
+  std::mutex mutex_;  // TODO(dkorolev): Remove it.
+  explicit TimeWindowTracker(const double w = 15000.0) : w_(w) {}
+  void AddAction(double t) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    q_.push(t);
+    Relax(t);
+  }
+  int GetValueOverSlidingWindow(double t) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    Relax(t);
+    return static_cast<int>(q_.size());
+  }
+  void Relax(double t) {
+    while (!q_.empty() && (t - q_.front()) > w_ + 1e-9) {
+      q_.pop();
+    }
+  }
+};
+
 // The `Cruncher` defines a real (no shit!) TailProduce worker.
 // It maintains the consistency of the `Box` and allows access to it.
 //
@@ -87,15 +111,17 @@ class Cruncher final {
       : demo_id_(demo_id),
         u_total_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_u_total", "point")),
         q_total_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_q_total", "point")),
+        e_15sec_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_e_15sec", "point")),
         image_(sherlock::Stream<VizPoint<std::string>>(demo_id_ + "_image", "point")),
-        consumer_(demo_id_, image_),
+        consumer_(demo_id_, image_, time_window_tracker_),
         mq_(consumer_),
         metronome_thread_(&Cruncher::MetronomeThread, this) {
     try {
       // Data streams.
-      HTTP(port).Register("/" + demo_id_ + "/layout/d/u_total_data", u_total_);
-      HTTP(port).Register("/" + demo_id_ + "/layout/d/q_total_data", q_total_);
-      HTTP(port).Register("/" + demo_id_ + "/layout/d/image_data", image_);
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/u", u_total_);
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/q", q_total_);
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/e", e_15sec_);
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/i", image_);
 
       // The black magic of serving the dashboard.
       HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), "/" + demo_id_ + "/static/");
@@ -136,28 +162,34 @@ class Cruncher final {
 
       HTTP(port).Register("/" + demo_id_ + "/layout", [](Request r) {
         using namespace dashboard::layout;
-        // `/meta` URL-s are relative to `/layout`.
-        r(Layout(Row({Col({Cell("/q_total_meta"), Cell("/u_total_meta")}), Cell("/image_meta")})), "layout");
+        r(Layout(Row({Col({Cell("/q_meta"), Cell("/u_meta"), Cell("/e_meta")}), Cell("/i_meta")})), "layout");
       });
 
-      HTTP(port).Register("/" + demo_id_ + "/layout/u_total_meta", [this](Request r) {
+      HTTP(port).Register("/" + demo_id_ + "/layout/u_meta", [this](Request r) {
         auto meta = dashboard::PlotMeta();
         meta.options.caption = "Total users.";
-        meta.data_url = "/d/u_total_data";
+        meta.data_url = "/d/u";
         r(meta, "meta");
       });
 
-      HTTP(port).Register("/" + demo_id_ + "/layout/q_total_meta", [this](Request r) {
+      HTTP(port).Register("/" + demo_id_ + "/layout/q_meta", [this](Request r) {
         auto meta = dashboard::PlotMeta();
         meta.options.caption = "Total questions.";
-        meta.data_url = "/d/q_total_data";
+        meta.data_url = "/d/q";
         r(meta, "meta");
       });
 
-      HTTP(port).Register("/" + demo_id_ + "/layout/image_meta", [this](Request r) {
+      HTTP(port).Register("/" + demo_id_ + "/layout/e_meta", [this](Request r) {
+        auto meta = dashboard::PlotMeta();
+        meta.options.caption = "15-Seconds Engagement.";
+        meta.data_url = "/d/e";
+        r(meta, "meta");
+      });
+
+      HTTP(port).Register("/" + demo_id_ + "/layout/i_meta", [this](Request r) {
         auto meta = dashboard::ImageMeta();
-        meta.options.header_text = "Users' Agreement";
-        meta.data_url = "/d/image_data";
+        meta.options.header_text = "Agreement between users.";
+        meta.data_url = "/d/i";
         r(meta, "meta");
       });
 
@@ -168,7 +200,7 @@ class Cruncher final {
               bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "index.html")),
               "text/html"));
 
-      HTTP(port).Register("/" + demo_id_ + "/layout/d/image_data/viz.png",
+      HTTP(port).Register("/" + demo_id_ + "/layout/d/i/viz.png",
                           [this](Request r) { mq_.EmplaceMessage(new VizMQMessage(std::move(r))); });
     } catch (const bricks::Exception& e) {
       std::cerr << "Crunched constructor exception: " << e.What() << std::endl;
@@ -205,8 +237,9 @@ class Cruncher final {
     typedef sherlock::StreamInstance<VizPoint<int>> stream_type;
     stream_type& p_u_total;
     stream_type& p_q_total;
+    stream_type& p_e_15sec;
     TickMQMessage() = delete;
-    TickMQMessage(stream_type& u, stream_type& p) : p_u_total(u), p_q_total(p) {}
+    TickMQMessage(stream_type& u, stream_type& p, stream_type& e) : p_u_total(u), p_q_total(p), p_e_15sec(e) {}
   };
 
   inline bool Entry(std::unique_ptr<schema::Base>& entry, size_t index, size_t total) {
@@ -246,13 +279,17 @@ class Cruncher final {
     WaitableAtomic<Visualization> visualization_;
 
     sherlock::StreamInstance<VizPoint<std::string>>& image_stream_;
+    TimeWindowTracker& time_window_tracker_;
 
     std::thread visualization_thread_;
 
     Consumer() = delete;
-    Consumer(const std::string& demo_id, sherlock::StreamInstance<VizPoint<std::string>>& image_stream)
+    Consumer(const std::string& demo_id,
+             sherlock::StreamInstance<VizPoint<std::string>>& image_stream,
+             TimeWindowTracker& time_window_tracker)
         : demo_id_(demo_id),
           image_stream_(image_stream),
+          time_window_tracker_(time_window_tracker),
           visualization_thread_(&Consumer::UpdateVisualizationThread, this) {}
 
     inline void OnMessage(std::unique_ptr<schema::Base>& message, size_t) {
@@ -276,11 +313,13 @@ class Cruncher final {
     inline void operator()(schema::UserRecord& u) {
       std::cerr << '@' << demo_id_ << " +U: " << u.uid << '\n';
       box_.users.push_back(u.uid);
+      time_window_tracker_.AddAction(static_cast<double>(u.ms));
       TriggerVisualizationUpdate();
     }
 
     inline void operator()(schema::QuestionRecord& q) {
       std::cerr << '@' << demo_id_ << " +Q" << static_cast<size_t>(q.qid) << " : \"" << q.text << "\"\n";
+      time_window_tracker_.AddAction(static_cast<double>(q.ms));
       box_.questions.push_back(q.text);
     }
 
@@ -288,6 +327,7 @@ class Cruncher final {
       std::cerr << '@' << demo_id_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
                 << static_cast<size_t>(a.qid) << '\n';
       box_.answers[a.qid][a.uid] = a.answer;
+      time_window_tracker_.AddAction(static_cast<double>(a.ms));
       TriggerVisualizationUpdate();
     }
 
@@ -308,9 +348,10 @@ class Cruncher final {
     }
 
     inline void operator()(TickMQMessage& message) {
-      message.p_u_total.Publish(VizPoint<int>{static_cast<double>(Now()), static_cast<int>(box_.users.size())});
-      message.p_q_total.Publish(
-          VizPoint<int>{static_cast<double>(Now()), static_cast<int>(box_.questions.size())});
+      const double t = static_cast<double>(Now());
+      message.p_u_total.Publish(VizPoint<int>{t, static_cast<int>(box_.users.size())});
+      message.p_q_total.Publish(VizPoint<int>{t, static_cast<int>(box_.questions.size())});
+      message.p_e_15sec.Publish(VizPoint<int>{t, time_window_tracker_.GetValueOverSlidingWindow(t)});
     }
 
     // TODO(dkorolev): Move to optimizing non-static function here.
@@ -504,10 +545,10 @@ class Cruncher final {
 
   // TODO(dkorolev): There should probably be a better, more Bricks-standard way to make use of a metronome.
   void MetronomeThread() {
-    const MILLISECONDS_INTERVAL period = static_cast<MILLISECONDS_INTERVAL>(250);
+    const MILLISECONDS_INTERVAL period = static_cast<MILLISECONDS_INTERVAL>(500);
     EPOCH_MILLISECONDS now = Now();
     while (true) {
-      mq_.EmplaceMessage(new TickMQMessage(u_total_, q_total_));
+      mq_.EmplaceMessage(new TickMQMessage(u_total_, q_total_, e_15sec_));
       bricks::time::SleepUntil(now + period);
       now = Now();
     }
@@ -518,7 +559,10 @@ class Cruncher final {
 
   sherlock::StreamInstance<VizPoint<int>> u_total_;
   sherlock::StreamInstance<VizPoint<int>> q_total_;
+  sherlock::StreamInstance<VizPoint<int>> e_15sec_;
   sherlock::StreamInstance<VizPoint<std::string>> image_;
+
+  TimeWindowTracker time_window_tracker_;
 
   Consumer consumer_;
   MMQ<Consumer, std::unique_ptr<schema::Base>> mq_;
