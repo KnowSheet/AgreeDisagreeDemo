@@ -461,6 +461,8 @@ class Cruncher final {
 
           fncas::OptimizerParameters params;
           params.SetValue("max_steps", 50);
+          params.SetValue("bt_beta", 0.5);
+          params.SetValue("grad_eps", 0.5);
           const auto result = fncas::ConjugateGradientOptimizer<StaticFunctionData>(params).Optimize(x);
 
           x = result.point;
