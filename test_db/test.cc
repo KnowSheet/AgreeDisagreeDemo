@@ -29,6 +29,11 @@ SOFTWARE.
 #include <string>
 
 #include "../db.h"
+#include "../schema.h"
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::Record, "0");
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::UserRecord, "U");
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::QuestionRecord, "Q");
+CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 
 #include "../../Bricks/dflags/dflags.h"
 #include "../../Bricks/3party/gtest/gtest-main-with-dflags.h"
@@ -48,7 +53,7 @@ struct UnitTestStorageListener {
   std::atomic_size_t n;
   std::string data;
   UnitTestStorageListener() : n(0u) {}
-  inline bool Entry(const std::unique_ptr<schema::Record>& entry) {
+  inline bool Entry(const std::unique_ptr<schema::Base>& entry, size_t, size_t) {
     data += JSON(entry, "record") + "\n";
     ++n;
     return true;
@@ -85,11 +90,11 @@ TEST(AgreeDisagreeDemo, Questions) {
   // A question can be added and gets a QID of 1.
   EXPECT_EQ(0u, listener.n);
   bricks::time::SetNow(bricks::time::EPOCH_MILLISECONDS(1001));
-  const auto added = HTTP(POST(url_prefix + "/test2/q?text=Why%3F"));
+  const auto added = HTTP(POST(url_prefix + "/test2/q?text=Why%3F", ""));
   EXPECT_EQ(200, static_cast<int>(added.code));
   EXPECT_EQ("{\"question\":{\"ms\":1001,\"qid\":1,\"text\":\"Why?\"}}\n", added.body);
   // A new question with the same text can not be added.
-  EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test2/q?text=Why%3F")).code));
+  EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test2/q?text=Why%3F", "")).code));
   // A question with QID of 1 can be retrieved now.
   const auto retrieved = HTTP(GET(url_prefix + "/test2/q?qid=1"));
   EXPECT_EQ(200, static_cast<int>(retrieved.code));
@@ -116,11 +121,11 @@ TEST(AgreeDisagreeDemo, Users) {
   // The user "adam" does not exist.
   EXPECT_EQ(404, static_cast<int>(HTTP(GET(url_prefix + "/test3/u?uid=adam")).code));
   // The user "adam" can be added.
-  const auto added = HTTP(POST(url_prefix + "/test3/u?uid=adam"));
+  const auto added = HTTP(POST(url_prefix + "/test3/u?uid=adam", ""));
   EXPECT_EQ(200, static_cast<int>(added.code));
   EXPECT_EQ("{\"user\":{\"ms\":1001,\"uid\":\"adam\"}}\n", added.body);
   // The user "adam" cannot be re-added.
-  EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test3/u?uid=adam")).code));
+  EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test3/u?uid=adam", "")).code));
   // The user "adam" exists now.
   EXPECT_EQ(200, static_cast<int>(HTTP(GET(url_prefix + "/test3/u?uid=adam")).code));
 }
