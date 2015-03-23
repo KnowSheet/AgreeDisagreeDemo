@@ -370,29 +370,30 @@ class Cruncher final {
 
       std::vector<OutputPoint> data;
 
-      template <typename T>
-      static typename fncas::output<T>::type compute(const T& x) {
+      template <typename X>
+      static X2V<X> compute(const X& x) {
+        typedef X2V<X> V;
         const auto& data = bricks::Singleton<StaticFunctionData>();
 
         assert(x.size() == data.N * 2);  // Pairs of coordinates.
 
         // Prepare the input.
-        std::vector<std::pair<typename fncas::output<T>::type, typename fncas::output<T>::type>> P(data.N);
+        std::vector<std::pair<V, V>> P(data.N);
         for (size_t i = 0; i < data.N; ++i) {
           P[i].first = x[i * 2];
           P[i].second = x[i * 2 + 1];
         }
 
         // Compute the cost function.
-        typename fncas::output<T>::type penalty = 0.0;
+        V penalty = 0.0;
         const double agree_prior = 0.1;
         const double disagree_prior = 0.5;
         const double max_distance = 2.05;
         for (size_t i = 0; i + 1 < data.N; ++i) {
           for (size_t j = i + 1; j < data.N; ++j) {
-            const typename fncas::output<T>::type dx = P[j].first - P[i].first;
-            const typename fncas::output<T>::type dy = P[j].second - P[i].second;
-            const typename fncas::output<T>::type d = sqrt(dx * dx + dy * dy);
+            const V dx = P[j].first - P[i].first;
+            const V dy = P[j].second - P[i].second;
+            const V d = sqrt(dx * dx + dy * dy);
             penalty -= log(d) * (disagree_prior + data.AD[i][j].second);
             penalty -= log(1.0 - (d / max_distance)) * (agree_prior + data.AD[i][j].first);
           }
