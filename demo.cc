@@ -79,18 +79,18 @@ struct TimeWindowTracker {
   std::queue<double> q_;
   std::mutex mutex_;  // TODO(dkorolev): Remove it.
   explicit TimeWindowTracker(const double w = 15000.0) : w_(w) {}
-  void Add(double x) {
+  void AddAction(double t) {
     std::lock_guard<std::mutex> guard(mutex_);
-    q_.push(x);
-    Relax(x);
+    q_.push(t);
+    Relax(t);
   }
-  int Get(double x) {
+  int GetValueOverSlidingWindow(double t) {
     std::lock_guard<std::mutex> guard(mutex_);
-    Relax(x);
+    Relax(t);
     return static_cast<int>(q_.size());
   }
-  void Relax(double x) {
-    while (!q_.empty() && (x - q_.front()) > w_ + 1e-9) {
+  void Relax(double t) {
+    while (!q_.empty() && (t - q_.front()) > w_ + 1e-9) {
       q_.pop();
     }
   }
@@ -313,13 +313,13 @@ class Cruncher final {
     inline void operator()(schema::UserRecord& u) {
       std::cerr << '@' << demo_id_ << " +U: " << u.uid << '\n';
       box_.users.push_back(u.uid);
-      time_window_tracker_.Add(static_cast<double>(u.ms));
+      time_window_tracker_.AddAction(static_cast<double>(u.ms));
       TriggerVisualizationUpdate();
     }
 
     inline void operator()(schema::QuestionRecord& q) {
       std::cerr << '@' << demo_id_ << " +Q" << static_cast<size_t>(q.qid) << " : \"" << q.text << "\"\n";
-      time_window_tracker_.Add(static_cast<double>(q.ms));
+      time_window_tracker_.AddAction(static_cast<double>(q.ms));
       box_.questions.push_back(q.text);
     }
 
@@ -327,7 +327,7 @@ class Cruncher final {
       std::cerr << '@' << demo_id_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
                 << static_cast<size_t>(a.qid) << '\n';
       box_.answers[a.qid][a.uid] = a.answer;
-      time_window_tracker_.Add(static_cast<double>(a.ms));
+      time_window_tracker_.AddAction(static_cast<double>(a.ms));
       TriggerVisualizationUpdate();
     }
 
@@ -351,7 +351,7 @@ class Cruncher final {
       const double t = static_cast<double>(Now());
       message.p_u_total.Publish(VizPoint<int>{t, static_cast<int>(box_.users.size())});
       message.p_q_total.Publish(VizPoint<int>{t, static_cast<int>(box_.questions.size())});
-      message.p_e_15sec.Publish(VizPoint<int>{t, time_window_tracker_.Get(t)});
+      message.p_e_15sec.Publish(VizPoint<int>{t, time_window_tracker_.GetValueOverSlidingWindow(t)});
     }
 
     // TODO(dkorolev): Move to optimizing non-static function here.
