@@ -40,6 +40,7 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 #include "../Bricks/net/api/api.h"
 #include "../Bricks/mq/inmemory/mq.h"
 #include "../Bricks/graph/gnuplot.h"
+#include "../Bricks/waitable_atomic/waitable_atomic.h"
 #include "../Bricks/dflags/dflags.h"
 #include "../Bricks/util/singleton.h"
 #include "../fncas/fncas/fncas.h"
@@ -48,10 +49,10 @@ DEFINE_int32(port, 3000, "Local port to use.");
 
 using bricks::FileSystem;
 using bricks::strings::Printf;
+using bricks::WaitableAtomic;
 using bricks::time::Now;
 using bricks::time::EPOCH_MILLISECONDS;
 using bricks::time::MILLISECONDS_INTERVAL;
-
 template <typename Y>
 struct VizPoint {
   double x;
@@ -89,55 +90,37 @@ class Cruncher final {
         image_(sherlock::Stream<VizPoint<std::string>>(demo_id_ + "_image", "point")),
         consumer_(demo_id_, image_),
         mq_(consumer_),
-        metronome_thread_(&Cruncher::Metronome, this) {
+        metronome_thread_(&Cruncher::MetronomeThread, this) {
     try {
       // Data streams.
       HTTP(port).Register("/" + demo_id_ + "/layout/d/u_total_data", u_total_);
       HTTP(port).Register("/" + demo_id_ + "/layout/d/q_total_data", q_total_);
       HTTP(port).Register("/" + demo_id_ + "/layout/d/image_data", image_);
 
-      // The visualization comes from `Consumer`/`Cruncher`, as well as the updates to this stream.
-      if (false) {
-        // TODO(dkorolev): This, of course, will be refactored. -- D.K.
-        std::thread([this]() {
-                      int index = 0;
-                      while (true) {
-                        // Note that in order for the `http://d0.knowsheet.local/...` URL-s to work,
-                        // 1) `d0.knowsheet.local` should point to `localhost` in `/etc/hosts`, and
-                        // 2) Port 80 should be forwarded (or the demo should run on it).
-                        image_.Publish(VizPoint<std::string>{
-                            static_cast<double>(bricks::time::Now()),
-                            Printf("http://d0.knowsheet.local/lorempixel/%d.jpg", index + 1)});
-                        index = (index + 1) % 10;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                      }
-                    }).detach();
-      }
-
       // The black magic of serving the dashboard.
       HTTP(port).ServeStaticFilesFrom(FileSystem::JoinPath("static", "js"), "/" + demo_id_ + "/static/");
 
       HTTP(port).Register("/" + demo_id_ + "/config", [this](Request r) {
         // Read the file once.
-        static const std::string dashboard_template = bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "template.html"));
+        static const std::string dashboard_template =
+            bricks::FileSystem::ReadFileAsString(bricks::FileSystem::JoinPath("static", "template.html"));
         // Build the placeholder replacements.
         std::map<std::string, std::string> replacement_map = {
-          // Custom style tags in the `<head>`, if needed.
-          {"<style id=\"knsh-dashboard-style-placeholder\"></style>", ""},
-          // Header columns between the logo and the GitHub link.
-          {
-            "<div class=\"knsh-columns__item\" id=\"knsh-header-columns-placeholder\"></div>",
-            "<div class=\"knsh-columns__item\" style=\"text-align: right;\">"
-              "<a href=\"/" + demo_id_ + "/a/\" class=\"knsh-header-link\"><span>Back to demo</span></a>"
-            "</div>"
-          },
-          // Footer columns between the copyright and the GitHub link.
-          {"<div class=\"knsh-columns__item\" id=\"knsh-footer-columns-placeholder\"></div>", ""},
-          // Anything to put above the generated dashboard.
-          {"<div id=\"knsh-dashboard-before-placeholder\"></div>", ""},
-          // Anything to put below the generated dashboard.
-          {"<div id=\"knsh-dashboard-after-placeholder\"></div>", ""}
-        };
+            // Custom style tags in the `<head>`, if needed.
+            {"<style id=\"knsh-dashboard-style-placeholder\"></style>", ""},
+            // Header columns between the logo and the GitHub link.
+            {"<div class=\"knsh-columns__item\" id=\"knsh-header-columns-placeholder\"></div>",
+             "<div class=\"knsh-columns__item\" style=\"text-align: right;\">"
+             "<a href=\"/" +
+                 demo_id_ +
+                 "/a/\" class=\"knsh-header-link\"><span>Back to demo</span></a>"
+                 "</div>"},
+            // Footer columns between the copyright and the GitHub link.
+            {"<div class=\"knsh-columns__item\" id=\"knsh-footer-columns-placeholder\"></div>", ""},
+            // Anything to put above the generated dashboard.
+            {"<div id=\"knsh-dashboard-before-placeholder\"></div>", ""},
+            // Anything to put below the generated dashboard.
+            {"<div id=\"knsh-dashboard-after-placeholder\"></div>", ""}};
         // Replace the placeholders with the replacements.
         std::string dashboard_template_output = dashboard_template;
         for (const auto& kv : replacement_map) {
@@ -226,7 +209,9 @@ class Cruncher final {
     TickMQMessage(stream_type& u, stream_type& p) : p_u_total(u), p_q_total(p) {}
   };
 
-  inline bool Entry(std::unique_ptr<schema::Base>& entry) {
+  inline bool Entry(std::unique_ptr<schema::Base>& entry, size_t index, size_t total) {
+    static_cast<void>(index);
+    static_cast<void>(total);
     // Note: The following call transfers ownership away from the passed in `unique_ptr`
     // into the `unique_ptr` in the message queue.
     // Looks straighforward to me after refactoring everything around it, yet comments and very welcome. -- D.K.
@@ -246,14 +231,29 @@ class Cruncher final {
     const std::string& demo_id_;
     Box box_;
 
-    std::string current_image_;
+    // Syncronization between the consumer thread that the thread that updates models and images
+    // is done via a lockable and waitable object.
+    struct Visualization {
+      // Increment this index to initiate model and image refresh.
+      size_t requested = 0;
+      // This index is either equal to `requested` ("caught up") or is less than it ("behind").
+      size_t done = 0;
+      // Copy of the data to generate the image for.
+      Box box;
+      // The image that is currently on display.
+      std::string image = "";
+    };
+    WaitableAtomic<Visualization> visualization_;
+
     sherlock::StreamInstance<VizPoint<std::string>>& image_stream_;
+
+    std::thread visualization_thread_;
 
     Consumer() = delete;
     Consumer(const std::string& demo_id, sherlock::StreamInstance<VizPoint<std::string>>& image_stream)
-        : demo_id_(demo_id), current_image_(RegenerateImage(box_)), image_stream_(image_stream) {
-      UpdateImageOnTheDashboard();
-    }
+        : demo_id_(demo_id),
+          image_stream_(image_stream),
+          visualization_thread_(&Consumer::UpdateVisualizationThread, this) {}
 
     inline void OnMessage(std::unique_ptr<schema::Base>& message, size_t) {
       struct types {
@@ -276,7 +276,7 @@ class Cruncher final {
     inline void operator()(schema::UserRecord& u) {
       std::cerr << '@' << demo_id_ << " +U: " << u.uid << '\n';
       box_.users.push_back(u.uid);
-      UpdateVisualization();
+      TriggerVisualizationUpdate();
     }
 
     inline void operator()(schema::QuestionRecord& q) {
@@ -288,7 +288,7 @@ class Cruncher final {
       std::cerr << '@' << demo_id_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
                 << static_cast<size_t>(a.qid) << '\n';
       box_.answers[a.qid][a.uid] = a.answer;
-      UpdateVisualization();
+      TriggerVisualizationUpdate();
     }
 
     inline void operator()(FunctionMQMessage& message) { message.function_with_box(box_); }
@@ -298,7 +298,13 @@ class Cruncher final {
     }
 
     inline void operator()(VizMQMessage& message) {
-      message.request(current_image_, HTTPResponseCode.OK, "image/png");
+      // Retrieve the current images, read-lock-protected, no external notifications.
+      const std::string image = visualization_.ImmutableScopedAccessor()->image;
+      if (!image.empty()) {
+        message.request(image, HTTPResponseCode.OK, "image/png");
+      } else {
+        message.request("Not ready yet.", HTTPResponseCode.BadRequest, "text/plain");
+      }
     }
 
     inline void operator()(TickMQMessage& message) {
@@ -309,8 +315,11 @@ class Cruncher final {
 
     // TODO(dkorolev): Move to optimizing non-static function here.
     struct StaticFunctionData {
+      // Number of users.
       size_t N;
-      std::vector<std::vector<size_t>> M;
+
+      // AD[i][j] = { # of agreements, # of disagreements }.
+      std::vector<std::vector<std::pair<size_t, size_t>>> AD;
 
       struct OutputPoint {
         double x;
@@ -334,34 +343,26 @@ class Cruncher final {
         }
 
         // Compute the cost function.
-        typename fncas::output<T>::type result = 0.0;
-        // Optimization: Keep the people who disagree with each other further away.
+        typename fncas::output<T>::type penalty = 0.0;
+        const double agree_prior = 0.1;
+        const double disagree_prior = 0.5;
+        const double max_distance = 2.05;
         for (size_t i = 0; i + 1 < data.N; ++i) {
           for (size_t j = i + 1; j < data.N; ++j) {
             const typename fncas::output<T>::type dx = P[j].first - P[i].first;
             const typename fncas::output<T>::type dy = P[j].second - P[i].second;
-            const typename fncas::output<T>::type d = dx * dx + dy * dy;
-            result += d * (data.M[i][j] + 3.0);
+            const typename fncas::output<T>::type d = sqrt(dx * dx + dy * dy);
+            penalty -= log(d) * (disagree_prior + data.AD[i][j].second);
+            penalty -= log(1.0 - (d / max_distance)) * (agree_prior + data.AD[i][j].first);
           }
         }
-
-        // Regularization: Keep the points around the boundary of the { C={0,0}, R=1 } circle.
-        typename fncas::output<T>::type regularization = 0.0;
-        for (size_t i = 0; i < data.N; ++i) {
-          const typename fncas::output<T>::type d = P[i].first * P[i].first + P[i].second * P[i].second;
-          const typename fncas::output<T>::type d_minus_one = d - 1.0;
-          const typename fncas::output<T>::type d_minus_one_squared = d_minus_one * d_minus_one;
-          regularization += d_minus_one_squared;
-        }
-
-        // Minimize regularization, maximize result.
-        return (regularization * 1.0) - result;
+        return penalty;
       }
 
       void Update(const Box& box) {
         auto& static_data = bricks::Singleton<StaticFunctionData>();
         size_t& N = static_data.N;
-        std::vector<std::vector<size_t>>& M = static_data.M;
+        std::vector<std::vector<std::pair<size_t, size_t>>>& AD = static_data.AD;
 
         const double t = static_cast<double>(bricks::time::Now());
         std::cerr << "Optimizing.\n";
@@ -376,7 +377,8 @@ class Cruncher final {
             uid_remap[box.users[i]] = i;
           }
 
-          M = std::vector<std::vector<size_t>>(N, std::vector<size_t>(N, 0));
+          AD = std::vector<std::vector<std::pair<size_t, size_t>>>(
+              N, std::vector<std::pair<size_t, size_t>>(N, std::pair<size_t, size_t>(0u, 0u)));
 
           for (const auto qit : box.answers) {
             std::vector<std::string> clusters[2];  // Disagree, Agree.
@@ -387,11 +389,19 @@ class Cruncher final {
                 clusters[1].push_back(uit.first);
               }
             }
+            for (size_t c = 0; c < 2; ++c) {
+              for (size_t i = 0; i + 1 < clusters[c].size(); ++i) {
+                for (size_t j = i + 1; j < clusters[c].size(); ++j) {
+                  ++AD[uid_remap[clusters[c][i]]][uid_remap[clusters[c][j]]].first;
+                  ++AD[uid_remap[clusters[c][j]]][uid_remap[clusters[c][i]]].first;
+                }
+              }
+            }
             if (!clusters[0].empty() && !clusters[1].empty()) {
               for (const auto& cit1 : clusters[0]) {
                 for (const auto& cit2 : clusters[1]) {
-                  ++M[uid_remap[cit1]][uid_remap[cit2]];
-                  ++M[uid_remap[cit2]][uid_remap[cit1]];
+                  ++AD[uid_remap[cit1]][uid_remap[cit2]].second;
+                  ++AD[uid_remap[cit2]][uid_remap[cit1]].second;
                 }
               }
             }
@@ -410,6 +420,8 @@ class Cruncher final {
 
           fncas::OptimizerParameters params;
           params.SetValue("max_steps", 50);
+          params.SetValue("bt_beta", 0.5);
+          params.SetValue("grad_eps", 0.5);
           const auto result = fncas::ConjugateGradientOptimizer<StaticFunctionData>(params).Optimize(x);
 
           x = result.point;
@@ -420,7 +432,8 @@ class Cruncher final {
           for (size_t i = 0; i < N; ++i) {
             std::cerr << bricks::strings::Printf("%10s", box.users[i].c_str());
             for (size_t j = 0; j < N; ++j) {
-              std::cerr << ' ' << M[i][j];
+              std::cerr << bricks::strings::Printf(
+                  "  %dA/%dD", static_cast<int>(AD[i][j].first), static_cast<int>(AD[i][j].second));
             }
             std::cerr << std::endl;
           }
@@ -456,20 +469,41 @@ class Cruncher final {
           .OutputFormat("pngcairo");
     }
 
-    void UpdateImageOnTheDashboard() {
-      const double t = static_cast<double>(bricks::time::Now());
-      // The image URL is relative to the data URL.
-      image_stream_.Publish(VizPoint<std::string>{t, Printf("/viz.png?key=%lf", t)});
+    void TriggerVisualizationUpdate() {
+      visualization_.MutableUse([this](Visualization& visualization) {
+        // Make a copy the `box_` to work with.
+        // And signal the image update thread that it now has a job.
+        visualization.box = box_;
+        ++visualization.requested;
+      });
     }
 
-    void UpdateVisualization() {
-      current_image_ = RegenerateImage(box_);
-      UpdateImageOnTheDashboard();
+    // The thread in which model and visualizations updates are run. Objectives:
+    // 1) Don't block the main thread while the model+visualization are being updated,
+    // 2) Skip intermediate models, if user action(s) happen faster than the model is updated.
+    void UpdateVisualizationThread() {
+      while (true) {
+        // Patiently wait for new user-generated data to update the model+visualization.
+        visualization_.Wait([](const Visualization& v) { return v.done < v.requested; });
+        // Work with the copy of the box.
+        Visualization copy = *visualization_.ImmutableScopedAccessor();
+        std::cerr << "Starting to process request " << copy.requested << std::endl;
+        const double timestamp = static_cast<double>(bricks::time::Now());
+        const std::string image = RegenerateImage(copy.box);
+        visualization_.MutableUse([&copy, &image](Visualization& v) {
+          v.image = image;
+          // Update to the `requested` version which was actually processed.
+          // This is the most concurrency-safe solution.
+          v.done = copy.requested;
+          std::cerr << "Processed request " << copy.requested << std::endl;
+        });
+        image_stream_.Publish(VizPoint<std::string>{timestamp, Printf("/viz.png?key=%lf", timestamp)});
+      }
     }
   };
 
   // TODO(dkorolev): There should probably be a better, more Bricks-standard way to make use of a metronome.
-  void Metronome() {
+  void MetronomeThread() {
     const MILLISECONDS_INTERVAL period = static_cast<MILLISECONDS_INTERVAL>(250);
     EPOCH_MILLISECONDS now = Now();
     while (true) {
@@ -518,28 +552,43 @@ struct Controller {
     HTTP(port_).Register("/" + demo_id_ + "/a/raw", std::ref(*db_));
 
     // Pre-populate a few users, questions and answers to start from.
-    db->DoAddUser("dima", Now() - MILLISECONDS_INTERVAL(5000));
-    db->DoAddUser("alice", Now() - MILLISECONDS_INTERVAL(4000));
-    db->DoAddUser("bob", Now() - MILLISECONDS_INTERVAL(3000));
-    db->DoAddUser("charles", Now() - MILLISECONDS_INTERVAL(2000));
+    db->DoAddUser("alice", Now() - MILLISECONDS_INTERVAL(9000));
+    db->DoAddUser("barbie", Now() - MILLISECONDS_INTERVAL(8000));
+    db->DoAddUser("cindy", Now() - MILLISECONDS_INTERVAL(7000));
+    db->DoAddUser("daphne", Now() - MILLISECONDS_INTERVAL(6000));
+    db->DoAddUser("eve", Now() - MILLISECONDS_INTERVAL(5000));
+    db->DoAddUser("fiona", Now() - MILLISECONDS_INTERVAL(4000));
+    db->DoAddUser("gina", Now() - MILLISECONDS_INTERVAL(3000));
+    db->DoAddUser("helen", Now() - MILLISECONDS_INTERVAL(2000));
+    db->DoAddUser("irene", Now() - MILLISECONDS_INTERVAL(1000));
 
     const auto vi = db->DoAddQuestion("Vi is the best text editor.", Now() - MILLISECONDS_INTERVAL(4500)).qid;
     const auto weed = db->DoAddQuestion("Marijuana should be legal.", Now() - MILLISECONDS_INTERVAL(3500)).qid;
     const auto bubble = db->DoAddQuestion("We are in the bubble.", Now() - MILLISECONDS_INTERVAL(2500)).qid;
     const auto movies = db->DoAddQuestion("Movies are getting worse.", Now() - MILLISECONDS_INTERVAL(1500)).qid;
 
-    db->DoAddAnswer("dima", vi, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("dima", weed, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("dima", bubble, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("dima", movies, schema::ANSWER::AGREE, Now());
     db->DoAddAnswer("alice", vi, schema::ANSWER::DISAGREE, Now());
     db->DoAddAnswer("alice", weed, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("bob", movies, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("bob", bubble, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("charles", vi, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("charles", weed, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("charles", bubble, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("charles", movies, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("barbie", movies, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("barbie", bubble, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("cindy", vi, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("cindy", weed, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("cindy", bubble, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("cindy", movies, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("daphne", vi, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("daphne", weed, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("daphne", bubble, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("daphne", movies, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("eve", weed, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("eve", movies, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("fiona", weed, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("fiona", movies, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("gina", weed, schema::ANSWER::AGREE, Now());
+    db->DoAddAnswer("gina", movies, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("helen", weed, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("helen", movies, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("irene", weed, schema::ANSWER::DISAGREE, Now());
+    db->DoAddAnswer("irene", movies, schema::ANSWER::DISAGREE, Now());
   }
 
   void Actions(Request r) {
