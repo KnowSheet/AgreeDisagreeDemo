@@ -47,6 +47,8 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 #include "../Bricks/util/singleton.h"
 #include "../fncas/fncas/fncas.h"
 
+#include "../Bricks/3party/cereal/include/external/base64.hpp"
+
 DEFINE_int32(port, 3000, "Local port to use.");
 
 using bricks::FileSystem;
@@ -577,16 +579,131 @@ class Cruncher final {
   void operator=(Cruncher&&) = delete;
 };
 
+class MixpanelUploader final {
+ public:
+  MixpanelUploader(const std::string& demo_id, const std::string& mixpanel_token)
+      : demo_id_(demo_id), mixpanel_token_(mixpanel_token) {}
+
+  inline bool Entry(std::unique_ptr<schema::Base>& entry, size_t index, size_t total) {
+    static_cast<void>(index);
+    static_cast<void>(total);
+
+    struct types {
+      typedef schema::Base base;
+      typedef std::tuple<schema::AnswerRecord> derived_list;
+      typedef bricks::rtti::RuntimeTupleDispatcher<base, derived_list> dispatcher;
+    };
+    types::dispatcher::DispatchCall(*entry, *this);
+
+    return true;
+  }
+
+  inline void Terminate() { std::cerr << '@' << demo_id_ << " MixpanelUploader is done.\n"; }
+
+  inline void operator()(schema::Base&) { /* ignore */
+  }
+
+  inline void operator()(schema::AnswerRecord& a) {
+    std::cerr << '@' << demo_id_ << " MixpanelUploader +A: " << a.uid << " `" << static_cast<int>(a.answer)
+              << "` Q" << static_cast<size_t>(a.qid) << '\n';
+    MixpanelQuestionAnsweredEvent ev(mixpanel_token_, a);
+    const std::string json = MultiKeyJSON(ev);
+    std::cerr << '@' << demo_id_ << " MixpanelUploader Event: " << json << std::endl;
+    const std::string base64_json = Base64Encode(json);
+    const std::string mixpanel_request = "http://api.mixpanel.com/track?data=" + base64_json;
+    std::cerr << '@' << demo_id_ << " MixpanelUploader Request: " << mixpanel_request << std::endl;
+    if (mixpanel_token_.empty()) {
+      std::cerr << '@' << demo_id_ << " MixpanelUploader Empty token, not sending." << std::endl;
+      return;
+    }
+    auto response = HTTP(GET(mixpanel_request));
+    std::cerr << '@' << demo_id_ << " MixpanelUploader Response: HTTP " << static_cast<int>(response.code) << " \"" << response.body << "\"" << std::endl;
+  }
+
+  template <typename T>
+  inline std::string MultiKeyJSON(T& object) {
+    // `bricks::cerealize::JSON` cannot make more than one top-level key-value pair.
+    std::ostringstream os;
+    {
+      // This scope is for `cereal` to flush the archive on scope exit.
+      auto ar =
+          bricks::cerealize::CerealStreamType<bricks::cerealize::CerealFormat::JSON>::CreateOutputArchive(os);
+      object.serialize(ar);
+    }
+    return os.str();
+  }
+
+  inline std::string Base64Encode(const std::string& str) {
+    return base64::encode(reinterpret_cast<const unsigned char*>(str.c_str()), str.length());
+  }
+
+  struct MixpanelQuestionAnsweredEvent {
+    struct Properties {
+      // Reserved properties.
+      std::string token;
+      std::string distinct_id;
+      time_t time;
+
+      // Custom properties.
+      schema::QID qid;
+      schema::ANSWER answer;
+
+      template <typename A>
+      void serialize(A& ar) {
+        ar(CEREAL_NVP(token),
+           CEREAL_NVP(distinct_id),
+           CEREAL_NVP(time),
+           cereal::make_nvp("Question", static_cast<size_t>(qid)),
+           cereal::make_nvp("Answer", static_cast<int>(answer)));
+      }
+    };
+
+    std::string event;
+    Properties properties;
+
+    MixpanelQuestionAnsweredEvent(const std::string& token, const schema::AnswerRecord& a) {
+      event = "Question Answered";
+      properties.token = token;
+      properties.distinct_id = a.uid;
+      properties.time = static_cast<uint64_t>(a.ms) / 1000;
+      properties.qid = a.qid;
+      properties.answer = a.answer;
+    }
+
+    template <typename A>
+    void serialize(A& ar) {
+      ar(CEREAL_NVP(event), CEREAL_NVP(properties));
+    }
+  };
+
+ private:
+  const std::string& demo_id_;
+
+  // Note: If `mixpanel_token_` is declared as a reference,
+  // a SIGSEGV happens while in `std::string::assign` at `properties.token = token;`
+  // in `MixpanelQuestionAnsweredEvent` constructor.
+  // TODO(sompylasar) + TODO(dkorolev): Investigate SIGSEGV on assign from a reference.
+  const std::string mixpanel_token_;
+
+  MixpanelUploader() = delete;
+  MixpanelUploader(const MixpanelUploader&) = delete;
+  void operator=(const MixpanelUploader&) = delete;
+  MixpanelUploader(MixpanelUploader&&) = delete;
+  void operator=(MixpanelUploader&&) = delete;
+};
+
 struct Controller {
  public:
-  explicit Controller(int port, const std::string& demo_id, db::Storage* db)
+  explicit Controller(int port, const std::string& demo_id, const std::string& mixpanel_token, db::Storage* db)
       : port_(port),
         demo_id_(demo_id),
         html_header_(FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "actions_header.html"))),
         html_footer_(FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "actions_footer.html"))),
         db_(db),
         cruncher_(port_, demo_id_),
-        scope_(db_->Subscribe(cruncher_)) {
+        cruncher_scope_(db_->Subscribe(cruncher_)),
+        mixpanel_uploader_(demo_id_, mixpanel_token),
+        mixpanel_uploader_scope_(db->Subscribe(mixpanel_uploader_)) {
     // The main controller page.
     HTTP(port_).Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
     HTTP(port_).Register("/" + demo_id_ + "/a", [this](Request r) {
@@ -688,7 +805,11 @@ struct Controller {
 
   db::Storage* db_;  // `db_` is owned by the creator of the instance of `Controller`.
   Cruncher cruncher_;
-  typename sherlock::StreamInstance<std::unique_ptr<schema::Base>>::template ListenerScope<Cruncher> scope_;
+  typename sherlock::StreamInstance<std::unique_ptr<schema::Base>>::template ListenerScope<Cruncher>
+      cruncher_scope_;
+  MixpanelUploader mixpanel_uploader_;
+  typename sherlock::StreamInstance<std::unique_ptr<schema::Base>>::template ListenerScope<MixpanelUploader>
+      mixpanel_uploader_scope_;
 
   Controller() = delete;
 };
@@ -713,8 +834,8 @@ int main() {
           demo_id = std::string(1, ('a' + (salt % 26))) + demo_id;  // "MSB" first ordering.
           salt /= 26;
         }
-        auto demo = new db::Storage(port, demo_id);             // Lives forever. -- D.K.
-        auto controller = new Controller(port, demo_id, demo);  // Lives forever. -- D.K.
+        auto demo = new db::Storage(port, demo_id);                             // Lives forever. -- D.K.
+        auto controller = new Controller(port, demo_id, mixpanel_token, demo);  // Lives forever. -- D.K.
         static_cast<void>(controller);
         r("", HTTPResponseCode.Found, "text/html", HTTPHeaders().Set("Location", "/" + demo_id + "/a/"));
       } catch (const bricks::Exception& e) {
