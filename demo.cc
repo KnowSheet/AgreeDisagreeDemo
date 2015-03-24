@@ -66,42 +66,46 @@ struct VizPoint {
   EPOCH_MILLISECONDS ExtractTimestamp() const { return static_cast<EPOCH_MILLISECONDS>(x); }
 };
 
-// The `Box` structure encapsulates the state of the demo.
-// All calls to it, updates and reads, go through the message queue, and thus are sequential.
-struct Box {
-  std::vector<std::string> users;
-  std::vector<std::string> questions;
-  std::map<schema::QID, std::map<schema::UID, schema::ANSWER>> answers;
-};
-
-struct TimeWindowTracker {
-  const double w_;
-  std::queue<double> q_;
-  std::mutex mutex_;  // TODO(dkorolev): Remove it.
-  explicit TimeWindowTracker(const double w = 15000.0) : w_(w) {}
-  void AddAction(double t) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    q_.push(t);
-    Relax(t);
-  }
-  int GetValueOverSlidingWindow(double t) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    Relax(t);
-    return static_cast<int>(q_.size());
-  }
-  void Relax(double t) {
-    while (!q_.empty() && (t - q_.front()) > w_ + 1e-9) {
-      q_.pop();
+// The current state of an instance of the demo.
+struct Snapshot {
+  // The `Box` structure encapsulates the state of the demo.
+  // All calls to it, updates and reads, go through the message queue, and thus are sequential.
+  struct Box {
+    std::vector<std::string> users;
+    std::vector<std::string> questions;
+    std::map<schema::QID, std::map<schema::UID, schema::ANSWER>> answers;
+  };
+  // The `SlidingWindowTracker` structure keeps track of engagement-related events at real time.
+  struct SlidingWindowTracker {
+    const double w_;
+    mutable std::queue<double> q_;
+    explicit SlidingWindowTracker(const double w = 15000.0) : w_(w) {}
+    void AddAction(double t) {
+      q_.push(t);
+      Relax(t);
     }
-  }
+    int GetValueOverSlidingWindow(double t) const {
+      Relax(t);
+      return static_cast<int>(q_.size());
+    }
+    void Relax(double t) const {
+      while (!q_.empty() && (t - q_.front()) > w_ + 1e-9) {
+        q_.pop();
+      }
+    }
+  };
+
+  // Data fields.
+  Box box;
+  SlidingWindowTracker engagement;
 };
 
 // The `Cruncher` defines a real (no shit!) TailProduce worker.
-// It maintains the consistency of the `Box` and allows access to it.
+// It maintains the consistency of the `Snapshot` and allows access to it.
 //
 // `Cruncher` works with two inputs of two "universes":
-// 1) The `storage::Record` entries, which update the state of the `Box`, and
-// 2) The `*MQMessage` messages, which use the `Box` to generate API responses or for other needs (ex. timer).
+// 1) The `storage::Record` entries, which update the state of the `Snapshot`, and
+// 2) The `*MQMessage` messages, which use the `Snapshot` for API responses or for other needs (ex. timer).
 //
 // The inputs of both universes get delivered to the `Cruncher` via the message queue.
 // Thus, they are processed sequentially, and no multithreading collisions can occur in the meantime.
@@ -113,7 +117,7 @@ class Cruncher final {
         q_total_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_q_total", "point")),
         e_15sec_(sherlock::Stream<VizPoint<int>>(demo_id_ + "_e_15sec", "point")),
         image_(sherlock::Stream<VizPoint<std::string>>(demo_id_ + "_image", "point")),
-        consumer_(demo_id_, image_, time_window_tracker_),
+        consumer_(demo_id_, image_),
         mq_(consumer_),
         metronome_thread_(&Cruncher::MetronomeThread, this) {
     try {
@@ -214,16 +218,16 @@ class Cruncher final {
   }
 
   struct FunctionMQMessage : schema::Base {
-    std::function<void(Box&)> function_with_box;
+    std::function<void(Snapshot&)> function_with_snapshot;
     FunctionMQMessage() = delete;
-    explicit FunctionMQMessage(std::function<void(Box&)> f) : function_with_box(f) {}
+    explicit FunctionMQMessage(std::function<void(Snapshot&)> f) : function_with_snapshot(f) {}
   };
 
   struct HTTPRequestMQMessage : schema::Base {
     Request request;
-    std::function<void(Request, Box&)> http_function_with_box;
+    std::function<void(Request, Snapshot&)> http_function_with_box;
     HTTPRequestMQMessage() = delete;
-    explicit HTTPRequestMQMessage(Request r, std::function<void(Request, Box&)> f)
+    explicit HTTPRequestMQMessage(Request r, std::function<void(Request, Snapshot&)> f)
         : request(std::move(r)), http_function_with_box(f) {}
   };
 
@@ -254,15 +258,17 @@ class Cruncher final {
 
   inline void Terminate() { std::cerr << '@' << demo_id_ << " is done.\n"; }
 
-  void CallFunctionWithBox(std::function<void(Box&)> f) { mq_.EmplaceMessage(new FunctionMQMessage(f)); }
+  void CallFunctionWithSnapshot(std::function<void(Snapshot&)> f) {
+    mq_.EmplaceMessage(new FunctionMQMessage(f));
+  }
 
-  void ServeRequestWithBox(Request r, std::function<void(Request, Box&)> f) {
+  void ServeRequestWithSnapshot(Request r, std::function<void(Request, Snapshot&)> f) {
     mq_.EmplaceMessage(new HTTPRequestMQMessage(std::move(r), f));
   }
 
   struct Consumer {
     const std::string& demo_id_;
-    Box box_;
+    Snapshot snapshot_;
 
     // Syncronization between the consumer thread that the thread that updates models and images
     // is done via a lockable and waitable object.
@@ -272,24 +278,20 @@ class Cruncher final {
       // This index is either equal to `requested` ("caught up") or is less than it ("behind").
       size_t done = 0;
       // Copy of the data to generate the image for.
-      Box box;
+      Snapshot::Box box;
       // The image that is currently on display.
       std::string image = "";
     };
     WaitableAtomic<Visualization> visualization_;
 
     sherlock::StreamInstance<VizPoint<std::string>>& image_stream_;
-    TimeWindowTracker& time_window_tracker_;
 
     std::thread visualization_thread_;
 
     Consumer() = delete;
-    Consumer(const std::string& demo_id,
-             sherlock::StreamInstance<VizPoint<std::string>>& image_stream,
-             TimeWindowTracker& time_window_tracker)
+    Consumer(const std::string& demo_id, sherlock::StreamInstance<VizPoint<std::string>>& image_stream)
         : demo_id_(demo_id),
           image_stream_(image_stream),
-          time_window_tracker_(time_window_tracker),
           visualization_thread_(&Consumer::UpdateVisualizationThread, this) {}
 
     inline void OnMessage(std::unique_ptr<schema::Base>& message, size_t) {
@@ -312,29 +314,29 @@ class Cruncher final {
 
     inline void operator()(schema::UserRecord& u) {
       std::cerr << '@' << demo_id_ << " +U: " << u.uid << '\n';
-      box_.users.push_back(u.uid);
-      time_window_tracker_.AddAction(static_cast<double>(u.ms));
+      snapshot_.box.users.push_back(u.uid);
+      snapshot_.engagement.AddAction(static_cast<double>(u.ms));
       TriggerVisualizationUpdate();
     }
 
     inline void operator()(schema::QuestionRecord& q) {
       std::cerr << '@' << demo_id_ << " +Q" << static_cast<size_t>(q.qid) << " : \"" << q.text << "\"\n";
-      time_window_tracker_.AddAction(static_cast<double>(q.ms));
-      box_.questions.push_back(q.text);
+      snapshot_.box.questions.push_back(q.text);
+      snapshot_.engagement.AddAction(static_cast<double>(q.ms));
     }
 
     inline void operator()(schema::AnswerRecord& a) {
       std::cerr << '@' << demo_id_ << " +A: " << a.uid << " `" << static_cast<int>(a.answer) << "` Q"
                 << static_cast<size_t>(a.qid) << '\n';
-      box_.answers[a.qid][a.uid] = a.answer;
-      time_window_tracker_.AddAction(static_cast<double>(a.ms));
+      snapshot_.box.answers[a.qid][a.uid] = a.answer;
+      snapshot_.engagement.AddAction(static_cast<double>(a.ms));
       TriggerVisualizationUpdate();
     }
 
-    inline void operator()(FunctionMQMessage& message) { message.function_with_box(box_); }
+    inline void operator()(FunctionMQMessage& message) { message.function_with_snapshot(snapshot_); }
 
     inline void operator()(HTTPRequestMQMessage& message) {
-      message.http_function_with_box(std::move(message.request), box_);
+      message.http_function_with_box(std::move(message.request), snapshot_);
     }
 
     inline void operator()(VizMQMessage& message) {
@@ -349,9 +351,9 @@ class Cruncher final {
 
     inline void operator()(TickMQMessage& message) {
       const double t = static_cast<double>(Now());
-      message.p_u_total.Publish(VizPoint<int>{t, static_cast<int>(box_.users.size())});
-      message.p_q_total.Publish(VizPoint<int>{t, static_cast<int>(box_.questions.size())});
-      message.p_e_15sec.Publish(VizPoint<int>{t, time_window_tracker_.GetValueOverSlidingWindow(t)});
+      message.p_u_total.Publish(VizPoint<int>{t, static_cast<int>(snapshot_.box.users.size())});
+      message.p_q_total.Publish(VizPoint<int>{t, static_cast<int>(snapshot_.box.questions.size())});
+      message.p_e_15sec.Publish(VizPoint<int>{t, snapshot_.engagement.GetValueOverSlidingWindow(t)});
     }
 
     // TODO(dkorolev): Move to optimizing non-static function here.
@@ -373,7 +375,7 @@ class Cruncher final {
       template <typename X>
       static X2V<X> compute(const X& x) {
         typedef X2V<X> V;
-        const auto& data = bricks::Singleton<StaticFunctionData>();
+        const auto& data = bricks::ThreadLocalSingleton<StaticFunctionData>();
 
         assert(x.size() == data.N * 2);  // Pairs of coordinates.
 
@@ -401,8 +403,8 @@ class Cruncher final {
         return penalty;
       }
 
-      void Update(const Box& box) {
-        auto& static_data = bricks::Singleton<StaticFunctionData>();
+      void Update(const Snapshot::Box& box) {
+        auto& static_data = bricks::ThreadLocalSingleton<StaticFunctionData>();
         size_t& N = static_data.N;
         std::vector<std::vector<std::pair<size_t, size_t>>>& AD = static_data.AD;
 
@@ -489,33 +491,37 @@ class Cruncher final {
       }
     };
 
-    static std::string RegenerateImage(const Box& box) {
-      bricks::Singleton<StaticFunctionData>().Update(box);
+    static std::string RegenerateImage(const Snapshot::Box& box) {
+      if (!box.users.empty()) {
+        bricks::ThreadLocalSingleton<StaticFunctionData>().Update(box);
 
-      using namespace bricks::gnuplot;
-      const auto f = [](Plotter& p) {
-        const auto& data = bricks::Singleton<StaticFunctionData>().data;
-        for (const auto& cit : data) {
-          p(cit.x, cit.y, cit.s);
-        }
-      };
+        using namespace bricks::gnuplot;
+        const auto f = [](Plotter& p) {
+          const auto& data = bricks::ThreadLocalSingleton<StaticFunctionData>().data;
+          for (const auto& cit : data) {
+            p(cit.x, cit.y, cit.s);
+          }
+        };
 
-      // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
-      return GNUPlot()
-          .ImageSize(400, 400)
-          .NoTitle()
-          .NoKey()
-          .NoTics()
-          .NoBorder()
-          .Plot(WithMeta(f).AsLabels())
-          .OutputFormat("pngcairo");
+        // TODO(dkorolev): Research more on `pngcairo`. It does look better for the demo. :-)
+        return GNUPlot()
+            .ImageSize(400, 400)
+            .NoTitle()
+            .NoKey()
+            .NoTics()
+            .NoBorder()
+            .Plot(WithMeta(f).AsLabels())
+            .OutputFormat("pngcairo");
+      } else {
+        return "";
+      }
     }
 
     void TriggerVisualizationUpdate() {
       visualization_.MutableUse([this](Visualization& visualization) {
-        // Make a copy the `box_` to work with.
+        // Make a copy the `snapshot_` to work with.
         // And signal the image update thread that it now has a job.
-        visualization.box = box_;
+        visualization.box = snapshot_.box;
         ++visualization.requested;
       });
     }
@@ -562,8 +568,6 @@ class Cruncher final {
   sherlock::StreamInstance<VizPoint<int>> q_total_;
   sherlock::StreamInstance<VizPoint<int>> e_15sec_;
   sherlock::StreamInstance<VizPoint<std::string>> image_;
-
-  TimeWindowTracker time_window_tracker_;
 
   Consumer consumer_;
   MMQ<Consumer, std::unique_ptr<schema::Base>> mq_;
@@ -637,19 +641,20 @@ struct Controller {
   }
 
   void Actions(Request r) {
-    // This request goes through the Cruncher's message queue to ensure no concurrent access to the box.
-    cruncher_.ServeRequestWithBox(std::move(r), [this](Request r, Box& box) {
+    // This request goes through the Cruncher's message queue to ensure no concurrent access to the snapshot.
+    cruncher_.ServeRequestWithSnapshot(std::move(r), [this](Request r, Snapshot& snapshot) {
       std::ostringstream table;
       table << "<tr><td></td>";
-      for (const auto& u : box.users) {
+      for (const auto& u : snapshot.box.users) {
         table << "<td align=center><b>" << u << "</b></td>";
       }
       table << "<tr>\n";
-      for (size_t qi = 0; qi < box.questions.size(); ++qi) {
-        const auto& q = box.questions[qi];
+      for (size_t qi = 0; qi < snapshot.box.questions.size(); ++qi) {
+        const auto& q = snapshot.box.questions[qi];
         table << "<tr><td align=right><b>" << q << "</b></td>";
-        std::map<schema::UID, schema::ANSWER>& current_answers = box.answers[static_cast<schema::QID>(qi + 1)];
-        for (const auto& u : box.users) {
+        std::map<schema::UID, schema::ANSWER>& current_answers =
+            snapshot.box.answers[static_cast<schema::QID>(qi + 1)];
+        for (const auto& u : snapshot.box.users) {
           table << "<td align=center>";
           struct VTC {  // VTC = { Value, Text, Color }.
             int value;
