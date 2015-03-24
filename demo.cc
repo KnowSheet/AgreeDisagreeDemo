@@ -607,9 +607,11 @@ class MixpanelUploader final {
     std::cerr << '@' << demo_id_ << " MixpanelUploader +A: " << a.uid << " `" << static_cast<int>(a.answer)
               << "` Q" << static_cast<size_t>(a.qid) << '\n';
     MixpanelQuestionAnsweredEvent ev(mixpanel_token_, a);
+    // WORKAROUND(sompylasar): `bricks::cerealize::JSON` cannot make more than one top-level key-value pair but we need this to build Mixpanel requests.
     const std::string json = MultiKeyJSON(ev);
     std::cerr << '@' << demo_id_ << " MixpanelUploader Event: " << json << std::endl;
     const std::string base64_json = Base64Encode(json);
+    // WORKAROUND(sompylasar): Not using `https://`, could not send HTTPS request.
     const std::string mixpanel_request = "http://api.mixpanel.com/track?data=" + base64_json;
     std::cerr << '@' << demo_id_ << " MixpanelUploader Request: " << mixpanel_request << std::endl;
     if (mixpanel_token_.empty()) {
@@ -622,18 +624,19 @@ class MixpanelUploader final {
 
   template <typename T>
   inline std::string MultiKeyJSON(T& object) {
-    // `bricks::cerealize::JSON` cannot make more than one top-level key-value pair.
     std::ostringstream os;
     {
       // This scope is for `cereal` to flush the archive on scope exit.
       auto ar =
           bricks::cerealize::CerealStreamType<bricks::cerealize::CerealFormat::JSON>::CreateOutputArchive(os);
+      // The following allows to make more than one top-level key-value pair.
       object.serialize(ar);
     }
     return os.str();
   }
 
   inline std::string Base64Encode(const std::string& str) {
+    // Note: Using `cereal`'s third-party library for base64-encoding.
     return base64::encode(reinterpret_cast<const unsigned char*>(str.c_str()), str.length());
   }
 
