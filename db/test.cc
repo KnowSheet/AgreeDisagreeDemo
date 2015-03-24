@@ -35,6 +35,10 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::UserRecord, "U");
 CEREAL_REGISTER_TYPE_WITH_NAME(schema::QuestionRecord, "Q");
 CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 
+// TODO(dkorolev): Move this into Bricks.
+#include "../bricks-cerealize-multikeyjson.h"
+#include "../bricks-cerealize-base64.h"
+
 #include "../../Bricks/dflags/dflags.h"
 #include "../../Bricks/3party/gtest/gtest-main-with-dflags.h"
 
@@ -130,4 +134,36 @@ TEST(AgreeDisagreeDemo, Users) {
   EXPECT_EQ(400, static_cast<int>(HTTP(POST(url_prefix + "/test3/u?uid=adam", "")).code));
   // The user "adam" exists now.
   EXPECT_EQ(200, static_cast<int>(HTTP(GET(url_prefix + "/test3/u?uid=adam")).code));
+}
+
+
+struct MultiKeyJSONTestObject {
+  struct InnerObject {
+    int inner_key = 1;
+
+    template <typename A>
+    void serialize(A& ar) {
+      ar(CEREAL_NVP(inner_key));
+    }
+  };
+
+  std::string key1 = "value1";
+  InnerObject key2;
+
+  template <typename A>
+  void serialize(A& ar) {
+    ar(CEREAL_NVP(key1), CEREAL_NVP(key2));
+  }
+};
+
+TEST(BricksCerealizeMultiKeyJSON, SmokeTest) {
+  // TODO(dkorolev): Please make `MultiKeyJSON` work with `const`.
+  MultiKeyJSONTestObject object;
+  const std::string json = bricks::cerealize::MultiKeyJSON(object);
+  EXPECT_EQ("{\"key1\":\"value1\",\"key2\":{\"inner_key\":1}}", json);
+}
+
+TEST(BricksCerealizeBase64Encode, SmokeTest) {
+  EXPECT_EQ("MTIzNDU=", bricks::cerealize::Base64Encode("12345"));
+  EXPECT_EQ("NzY1NFh5Wg==", bricks::cerealize::Base64Encode("7654XyZ"));
 }

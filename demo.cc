@@ -47,6 +47,7 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 #include "../Bricks/util/singleton.h"
 #include "../fncas/fncas/fncas.h"
 
+// TODO(dkorolev): Move this into Bricks.
 #include "bricks-cerealize-multikeyjson.h"
 #include "bricks-cerealize-base64.h"
 
