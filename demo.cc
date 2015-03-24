@@ -754,6 +754,8 @@ int main() {
       new bricks::net::api::StaticFileServer(
           bricks::FileSystem::ReadFileAsString(FileSystem::JoinPath(dir, "landing.html")), "text/html"));
 
+  std::cerr << "Serving at port " << port << ".\n";
+
   // Run forever.
   HTTP(port).Join();
 }
