@@ -705,7 +705,7 @@ int main() {
         // HACK(sompylasar): Parse the URL-encoded body as a query-string.
         URL body_parsed = URL("/?" + r.body);
         std::string mixpanel_token = bricks::strings::Trim(body_parsed.query.get("mixpanel_token", ""));
-        std::cerr << "MixPanel token: \"" << mixpanel_token << "\"" << std::endl;
+        std::cerr << "Mixpanel token: \"" << mixpanel_token << "\"" << std::endl;
         uint64_t salt = static_cast<uint64_t>(Now());
         // Randomly generated `demo_id` w/o safety checking. -- D.K.
         std::string demo_id = "";
