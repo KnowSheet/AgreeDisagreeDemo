@@ -600,7 +600,8 @@ class MixpanelUploader final {
 
   inline void Terminate() { std::cerr << '@' << demo_id_ << " MixpanelUploader is done.\n"; }
 
-  inline void operator()(schema::Base&) { /* ignore */
+  inline void operator()(schema::Base&) {
+    // TODO(dkorolev): This is required for the compilation not to fail with `no match for call to ‘(MixpanelUploader) (schema::Base&)`.
   }
 
   inline void operator()(schema::AnswerRecord& a) {
