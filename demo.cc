@@ -55,6 +55,7 @@ using bricks::WaitableAtomic;
 using bricks::time::Now;
 using bricks::time::EPOCH_MILLISECONDS;
 using bricks::time::MILLISECONDS_INTERVAL;
+
 template <typename Y>
 struct VizPoint {
   double x;
