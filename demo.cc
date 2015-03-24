@@ -643,13 +643,19 @@ class MixpanelUploader final {
 
   struct MixpanelQuestionAnsweredEvent {
     struct Properties {
-      // Reserved properties.
+      // (reserved) The Mixpanel project token.
       std::string token;
+
+      // (reserved) The identifier of the user who caused the event to happen.
       std::string distinct_id;
+
+      // (reserved) The time of the event, in seconds.
       time_t time;
 
-      // Custom properties.
+      // Question identifier.
       schema::QID qid;
+
+      // Answer identifier.
       schema::ANSWER answer;
 
       template <typename A>
