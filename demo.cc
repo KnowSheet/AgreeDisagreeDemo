@@ -688,12 +688,7 @@ class MixpanelUploader final {
 
  private:
   const std::string& demo_id_;
-
-  // Note: If `mixpanel_token_` is declared as a reference,
-  // a SIGSEGV happens while in `std::string::assign` at `properties.token = token;`
-  // in `MixpanelQuestionAnsweredEvent` constructor.
-  // TODO(sompylasar) + TODO(dkorolev): Investigate SIGSEGV on assign from a reference.
-  const std::string mixpanel_token_;
+  const std::string& mixpanel_token_;
 
   MixpanelUploader() = delete;
   MixpanelUploader(const MixpanelUploader&) = delete;
@@ -707,12 +702,13 @@ struct Controller {
   explicit Controller(int port, const std::string& demo_id, const std::string& mixpanel_token, db::Storage* db)
       : port_(port),
         demo_id_(demo_id),
+        mixpanel_token_(mixpanel_token),
         html_header_(FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "actions_header.html"))),
         html_footer_(FileSystem::ReadFileAsString(FileSystem::JoinPath("static", "actions_footer.html"))),
         db_(db),
         cruncher_(port_, demo_id_),
         cruncher_scope_(db_->Subscribe(cruncher_)),
-        mixpanel_uploader_(demo_id_, mixpanel_token),
+        mixpanel_uploader_(demo_id_, mixpanel_token_),
         mixpanel_uploader_scope_(db->Subscribe(mixpanel_uploader_)) {
     // The main controller page.
     HTTP(port_).Register("/" + demo_id_ + "/a/", std::bind(&Controller::Actions, this, std::placeholders::_1));
@@ -810,6 +806,8 @@ struct Controller {
  private:
   const int port_;
   const std::string demo_id_;
+  const std::string mixpanel_token_;
+
   const std::string html_header_;
   const std::string html_footer_;
 
