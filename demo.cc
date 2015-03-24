@@ -650,7 +650,7 @@ class MixpanelUploader final {
       std::string distinct_id;
 
       // (reserved) The time of the event, in seconds.
-      time_t time;
+      uint64_t time;
 
       // Question identifier.
       schema::QID qid;
