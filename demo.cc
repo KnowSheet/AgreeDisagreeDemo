@@ -47,7 +47,8 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 #include "../Bricks/util/singleton.h"
 #include "../fncas/fncas/fncas.h"
 
-#include "../Bricks/3party/cereal/include/external/base64.hpp"
+#include "bricks-cerealize-multikeyjson.h"
+#include "bricks-cerealize-base64.h"
 
 DEFINE_int32(port, 3000, "Local port to use.");
 
@@ -609,9 +610,9 @@ class MixpanelUploader final {
               << "` Q" << static_cast<size_t>(a.qid) << '\n';
     MixpanelQuestionAnsweredEvent ev(mixpanel_token_, a);
     // WORKAROUND(sompylasar): `bricks::cerealize::JSON` cannot make more than one top-level key-value pair but we need this to build Mixpanel requests.
-    const std::string json = MultiKeyJSON(ev);
+    const std::string json = bricks::cerealize::MultiKeyJSON(ev);
     std::cerr << '@' << demo_id_ << " MixpanelUploader Event: " << json << std::endl;
-    const std::string base64_json = Base64Encode(json);
+    const std::string base64_json = bricks::cerealize::Base64Encode(json);
     // WORKAROUND(sompylasar): Not using `https://`, could not send HTTPS request.
     const std::string mixpanel_request = "http://api.mixpanel.com/track?data=" + base64_json;
     std::cerr << '@' << demo_id_ << " MixpanelUploader Request: " << mixpanel_request << std::endl;
@@ -621,24 +622,6 @@ class MixpanelUploader final {
     }
     auto response = HTTP(GET(mixpanel_request));
     std::cerr << '@' << demo_id_ << " MixpanelUploader Response: HTTP " << static_cast<int>(response.code) << " \"" << response.body << "\"" << std::endl;
-  }
-
-  template <typename T>
-  inline std::string MultiKeyJSON(T& object) {
-    std::ostringstream os;
-    {
-      // This scope is for `cereal` to flush the archive on scope exit.
-      auto ar =
-          bricks::cerealize::CerealStreamType<bricks::cerealize::CerealFormat::JSON>::CreateOutputArchive(os);
-      // The following allows to make more than one top-level key-value pair.
-      object.serialize(ar);
-    }
-    return os.str();
-  }
-
-  inline std::string Base64Encode(const std::string& str) {
-    // Note: Using `cereal`'s third-party library for base64-encoding.
-    return base64::encode(reinterpret_cast<const unsigned char*>(str.c_str()), str.length());
   }
 
   struct MixpanelQuestionAnsweredEvent {
