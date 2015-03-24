@@ -591,7 +591,7 @@ class MixpanelUploader final {
   MixpanelUploader(const std::string& demo_id, const std::string& mixpanel_token)
       : demo_id_(demo_id), mixpanel_token_(mixpanel_token) {}
 
-  inline bool Entry(std::unique_ptr<schema::Base>& entry, size_t index, size_t total) {
+  inline bool Entry(const std::unique_ptr<schema::Base>& entry, size_t index, size_t total) {
     static_cast<void>(index);
     static_cast<void>(total);
 
