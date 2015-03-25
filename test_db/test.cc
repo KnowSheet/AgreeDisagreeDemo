@@ -29,6 +29,7 @@ SOFTWARE.
 #include <string>
 
 #include "../db.h"
+#include "../schema.h"
 
 CEREAL_REGISTER_TYPE_WITH_NAME(schema::Record, "0");
 CEREAL_REGISTER_TYPE_WITH_NAME(schema::UserRecord, "U");
