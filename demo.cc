@@ -147,7 +147,7 @@ class Cruncher final {
              "<div class=\"knsh-columns__item\" style=\"text-align: right;\">"
              "<a href=\"/" +
                  demo_id_ +
-                 "/a/\" class=\"knsh-header-link\"><span>Back to demo</span></a>"
+                 "/a/\" class=\"knsh-header-link\"><span>Actions</span></a>"
                  "</div>"},
             // Footer columns between the copyright and the GitHub link.
             {"<div class=\"knsh-columns__item\" id=\"knsh-footer-columns-placeholder\"></div>", ""},
