@@ -230,10 +230,10 @@ class Cruncher final {
 
   struct HTTPRequestMQMessage : schema::Base {
     Request request;
-    std::function<void(Request, Snapshot&)> http_function_with_box;
+    std::function<void(Request, Snapshot&)> http_function_with_snapshot;
     HTTPRequestMQMessage() = delete;
     explicit HTTPRequestMQMessage(Request r, std::function<void(Request, Snapshot&)> f)
-        : request(std::move(r)), http_function_with_box(f) {}
+        : request(std::move(r)), http_function_with_snapshot(f) {}
   };
 
   struct VizMQMessage : schema::Base {
@@ -341,7 +341,7 @@ class Cruncher final {
     inline void operator()(FunctionMQMessage& message) { message.function_with_snapshot(snapshot_); }
 
     inline void operator()(HTTPRequestMQMessage& message) {
-      message.http_function_with_box(std::move(message.request), snapshot_);
+      message.http_function_with_snapshot(std::move(message.request), snapshot_);
     }
 
     inline void operator()(VizMQMessage& message) {
@@ -524,7 +524,7 @@ class Cruncher final {
 
     void TriggerVisualizationUpdate() {
       visualization_.MutableUse([this](Visualization& visualization) {
-        // Make a copy the `snapshot_` to work with.
+        // Make a copy of `snapshot_.box` to work with.
         // And signal the image update thread that it now has a job.
         visualization.box = snapshot_.box;
         ++visualization.requested;
