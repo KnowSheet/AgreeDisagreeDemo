@@ -587,6 +587,87 @@ class Cruncher final {
 
 class MixpanelUploader final {
  public:
+  struct MixpanelEvent {
+    struct User {
+      struct Properties {
+        // (reserved) The Mixpanel project token.
+        std::string token;
+
+        // (reserved) The identifier of the user who caused the event to happen.
+        std::string distinct_id;
+
+        // (reserved) The time of the event, in seconds.
+        uint64_t time;
+
+        template <typename A>
+        void serialize(A& ar) {
+          ar(CEREAL_NVP(token), CEREAL_NVP(distinct_id), CEREAL_NVP(time));
+        }
+      };
+
+      std::string event;
+      Properties properties;
+
+      User(const std::string& token, const schema::UserRecord& u) {
+        event = "User";
+        properties.token = token;
+        properties.distinct_id = u.uid;
+        properties.time = static_cast<uint64_t>(u.ms) / 1000;
+      }
+
+      template <typename A>
+      void serialize(A& ar) {
+        ar(CEREAL_NVP(event), CEREAL_NVP(properties));
+      }
+    };
+
+    struct Answer {
+      struct Properties {
+        // (reserved) The Mixpanel project token.
+        std::string token;
+
+        // (reserved) The identifier of the user who caused the event to happen.
+        std::string distinct_id;
+
+        // (reserved) The time of the event, in seconds.
+        uint64_t time;
+
+        // Question identifier.
+        schema::QID qid;
+
+        // Answer identifier.
+        schema::ANSWER answer;
+
+        template <typename A>
+        void serialize(A& ar) {
+          ar(CEREAL_NVP(token),
+             CEREAL_NVP(distinct_id),
+             CEREAL_NVP(time),
+             cereal::make_nvp("Question", static_cast<size_t>(qid)),
+             cereal::make_nvp("Answer", static_cast<int>(answer)));
+        }
+      };
+
+      std::string event;
+      Properties properties;
+
+      Answer(const std::string& token, const schema::AnswerRecord& a) {
+        event = "Answer";
+        properties.token = token;
+        properties.distinct_id = a.uid;
+        properties.time = static_cast<uint64_t>(a.ms) / 1000;
+        properties.qid = a.qid;
+        properties.answer = a.answer;
+      }
+
+      template <typename A>
+      void serialize(A& ar) {
+        ar(CEREAL_NVP(event), CEREAL_NVP(properties));
+      }
+    };
+
+  };  // struct MixpanelEvent
+
   MixpanelUploader(const std::string& demo_id, const std::string& mixpanel_token)
       : demo_id_(demo_id), mixpanel_token_(mixpanel_token) {}
 
@@ -596,7 +677,7 @@ class MixpanelUploader final {
 
     struct types {
       typedef schema::Base base;
-      typedef std::tuple<schema::AnswerRecord> derived_list;
+      typedef std::tuple<schema::UserRecord, schema::AnswerRecord> derived_list;
       typedef bricks::rtti::RuntimeTupleDispatcher<base, derived_list> dispatcher;
     };
     types::dispatcher::DispatchCall(*entry, *this);
@@ -607,17 +688,12 @@ class MixpanelUploader final {
   inline void Terminate() { std::cerr << '@' << demo_id_ << " MixpanelUploader is done.\n"; }
 
   inline void operator()(schema::Base&) {
-    // This method is required for RTTI dispatching to compile. It will never be called.
-    throw std::logic_error("`inline void operator()(schema::Base&)` called.");
+    // Sink for ignored events; currently `Question`-s.
   }
 
-  inline void operator()(schema::AnswerRecord& a) {
-    std::cerr << '@' << demo_id_ << " MixpanelUploader +A: " << a.uid << " `" << static_cast<int>(a.answer)
-              << "` Q" << static_cast<size_t>(a.qid) << '\n';
-    MixpanelQuestionAnsweredEvent ev(mixpanel_token_, a);
-    // WORKAROUND(sompylasar): `bricks::cerealize::JSON` cannot make more than one top-level key-value pair,
-    // but we need this to build Mixpanel requests.
-    const std::string json = bricks::cerealize::MultiKeyJSON(ev);
+  template <typename T>
+  inline void PushMixpanelEvent(T&& event) {
+    const std::string json = bricks::cerealize::MultiKeyJSON(event);
     std::cerr << '@' << demo_id_ << " MixpanelUploader Event: " << json << std::endl;
     const std::string base64_json = bricks::cerealize::Base64Encode(json);
     // WORKAROUND(sompylasar): Not using `https://`, could not send HTTPS request.
@@ -632,50 +708,11 @@ class MixpanelUploader final {
               << " \"" << response.body << "\"" << std::endl;
   }
 
-  struct MixpanelQuestionAnsweredEvent {
-    struct Properties {
-      // (reserved) The Mixpanel project token.
-      std::string token;
+  inline void operator()(schema::UserRecord& u) { PushMixpanelEvent(MixpanelEvent::User(mixpanel_token_, u)); }
 
-      // (reserved) The identifier of the user who caused the event to happen.
-      std::string distinct_id;
-
-      // (reserved) The time of the event, in seconds.
-      uint64_t time;
-
-      // Question identifier.
-      schema::QID qid;
-
-      // Answer identifier.
-      schema::ANSWER answer;
-
-      template <typename A>
-      void serialize(A& ar) {
-        ar(CEREAL_NVP(token),
-           CEREAL_NVP(distinct_id),
-           CEREAL_NVP(time),
-           cereal::make_nvp("Question", static_cast<size_t>(qid)),
-           cereal::make_nvp("Answer", static_cast<int>(answer)));
-      }
-    };
-
-    std::string event;
-    Properties properties;
-
-    MixpanelQuestionAnsweredEvent(const std::string& token, const schema::AnswerRecord& a) {
-      event = "Question Answered";
-      properties.token = token;
-      properties.distinct_id = a.uid;
-      properties.time = static_cast<uint64_t>(a.ms) / 1000;
-      properties.qid = a.qid;
-      properties.answer = a.answer;
-    }
-
-    template <typename A>
-    void serialize(A& ar) {
-      ar(CEREAL_NVP(event), CEREAL_NVP(properties));
-    }
-  };
+  inline void operator()(schema::AnswerRecord& a) {
+    PushMixpanelEvent(MixpanelEvent::Answer(mixpanel_token_, a));
+  }
 
  private:
   const std::string& demo_id_;
