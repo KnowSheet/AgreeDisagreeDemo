@@ -49,7 +49,6 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 
 // TODO(dkorolev): Move this into Bricks.
 #include "bricks-cerealize-multikeyjson.h"
-#include "bricks-cerealize-base64.h"
 
 DEFINE_int32(port, 3000, "Local port to use.");
 
