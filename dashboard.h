@@ -47,9 +47,12 @@ struct Config {
 
   explicit Config(const std::string& layout_url, const std::string& dashboard_template)
       : layout_url(layout_url), dashboard_template(dashboard_template) {
-    // TODO(dkorolev): Multiple production sub-domains should be listed here.
+    // Assume 'TLD=tailproduce.io' of some sort ...
+    const char* tld_env = std::getenv("TLD");
+    // ... or require a local '/etc/hosts' tweak.
+    const std::string tld = tld_env ? tld_env : "knowsheet.local";
     for (int i = 0; i < 10; ++i) {
-      data_hostnames.push_back(bricks::strings::Printf("d%d.knowsheet.local", i));
+      data_hostnames.push_back(bricks::strings::Printf("d%d.%s", i, tld.c_str()));
     }
   }
 

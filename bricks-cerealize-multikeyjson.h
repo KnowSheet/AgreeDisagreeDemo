@@ -31,19 +31,19 @@ SOFTWARE.
 namespace bricks {
 namespace cerealize {
 
-  // TODO(dkorolev): Move this into Bricks.
-  // TODO(dkorolev):  Please make this work with `const` via `save(ar)` instead of `serialize(ar)`.
-  template <typename T>
-  inline std::string MultiKeyJSON(T&& object) {
-    std::ostringstream os;
-    {
-      // This scope is for `cereal` to flush the archive on scope exit.
-      auto ar = cerealize::CerealStreamType<cerealize::CerealFormat::JSON>::CreateOutputArchive(os);
-      // The following allows to make more than one top-level key-value pair.
-      object.serialize(ar);
-    }
-    return os.str();
+// TODO(dkorolev): Move this into Bricks.
+// TODO(dkorolev): Please make this work with `const` via `save(ar)` instead of `serialize(ar)`.
+template <typename T>
+inline std::string MultiKeyJSON(T&& object) {
+  std::ostringstream os;
+  {
+    // This scope is for `cereal` to flush the archive on scope exit.
+    auto ar = cerealize::CerealStreamType<cerealize::CerealFormat::JSON>::CreateOutputArchive(os);
+    // The following allows to make more than one top-level key-value pair.
+    object.serialize(ar);
   }
+  return os.str();
+}
 
 }  // namespace cerealize
 }  // namespace bricks

@@ -137,7 +137,6 @@ TEST(AgreeDisagreeDemo, Users) {
   EXPECT_EQ(200, static_cast<int>(HTTP(GET(url_prefix + "/test3/u?uid=adam")).code));
 }
 
-
 struct MultiKeyJSONTestObject {
   struct InnerObject {
     int inner_key = 1;
