@@ -607,14 +607,16 @@ class MixpanelUploader final {
   inline void Terminate() { std::cerr << '@' << demo_id_ << " MixpanelUploader is done.\n"; }
 
   inline void operator()(schema::Base&) {
-    // TODO(dkorolev): This is required for the compilation not to fail with `no match for call to ‘(MixpanelUploader) (schema::Base&)`.
+    // This method is required for RTTI dispatching to compile. It will never be called.
+    throw std::logic_error("`inline void operator()(schema::Base&)` called.");
   }
 
   inline void operator()(schema::AnswerRecord& a) {
     std::cerr << '@' << demo_id_ << " MixpanelUploader +A: " << a.uid << " `" << static_cast<int>(a.answer)
               << "` Q" << static_cast<size_t>(a.qid) << '\n';
     MixpanelQuestionAnsweredEvent ev(mixpanel_token_, a);
-    // WORKAROUND(sompylasar): `bricks::cerealize::JSON` cannot make more than one top-level key-value pair but we need this to build Mixpanel requests.
+    // WORKAROUND(sompylasar): `bricks::cerealize::JSON` cannot make more than one top-level key-value pair,
+    // but we need this to build Mixpanel requests.
     const std::string json = bricks::cerealize::MultiKeyJSON(ev);
     std::cerr << '@' << demo_id_ << " MixpanelUploader Event: " << json << std::endl;
     const std::string base64_json = bricks::cerealize::Base64Encode(json);
@@ -626,7 +628,8 @@ class MixpanelUploader final {
       return;
     }
     auto response = HTTP(GET(mixpanel_request));
-    std::cerr << '@' << demo_id_ << " MixpanelUploader Response: HTTP " << static_cast<int>(response.code) << " \"" << response.body << "\"" << std::endl;
+    std::cerr << '@' << demo_id_ << " MixpanelUploader Response: HTTP " << static_cast<int>(response.code)
+              << " \"" << response.body << "\"" << std::endl;
   }
 
   struct MixpanelQuestionAnsweredEvent {
