@@ -35,22 +35,25 @@ CEREAL_REGISTER_TYPE_WITH_NAME(schema::UserRecord, "U");
 CEREAL_REGISTER_TYPE_WITH_NAME(schema::QuestionRecord, "Q");
 CEREAL_REGISTER_TYPE_WITH_NAME(schema::AnswerRecord, "A");
 
+#include "../Bricks/cerealize/cerealize.h"
+#include "../Bricks/dflags/dflags.h"
 #include "../Bricks/file/file.h"
+#include "../Bricks/graph/gnuplot.h"
+#include "../Bricks/mq/inmemory/mq.h"
+#include "../Bricks/net/api/api.h"
+#include "../Bricks/rtti/dispatcher.h"
 #include "../Bricks/strings/util.h"
 #include "../Bricks/time/chrono.h"
-#include "../Bricks/rtti/dispatcher.h"
-#include "../Bricks/net/api/api.h"
-#include "../Bricks/mq/inmemory/mq.h"
-#include "../Bricks/graph/gnuplot.h"
-#include "../Bricks/waitable_atomic/waitable_atomic.h"
-#include "../Bricks/dflags/dflags.h"
 #include "../Bricks/util/singleton.h"
+#include "../Bricks/waitable_atomic/waitable_atomic.h"
 #include "../fncas/fncas/fncas.h"
 
 // TODO(dkorolev): Move this into Bricks.
 #include "bricks-cerealize-multikeyjson.h"
 
 DEFINE_int32(port, 3000, "Local port to use.");
+DEFINE_string(startup_data, "data.json", "File name to read the initial content from.");
+DEFINE_bool(gen, false, "Run `./.noshit/demo --gen=1` to re-generate the `startup_data` file.");
 
 using bricks::FileSystem;
 using bricks::strings::Printf;
@@ -703,9 +706,13 @@ class MixpanelUploader final {
       std::cerr << '@' << demo_id_ << " MixpanelUploader Empty token, not sending." << std::endl;
       return;
     }
-    auto response = HTTP(GET(mixpanel_request));
-    std::cerr << '@' << demo_id_ << " MixpanelUploader Response: HTTP " << static_cast<int>(response.code)
-              << " \"" << response.body << "\"" << std::endl;
+    try {
+      auto response = HTTP(GET(mixpanel_request));
+      std::cerr << '@' << demo_id_ << " MixpanelUploader Response: HTTP " << static_cast<int>(response.code)
+                << " \"" << response.body << "\"" << std::endl;
+    } catch (const bricks::net::NetworkException& e) {
+      std::cerr << '@' << demo_id_ << " MixpanelUploader Error:" << e.What() << std::endl;
+    }
   }
 
   inline void operator()(schema::UserRecord& u) { PushMixpanelEvent(MixpanelEvent::User(mixpanel_token_, u)); }
@@ -724,6 +731,72 @@ class MixpanelUploader final {
   MixpanelUploader(MixpanelUploader&&) = delete;
   void operator=(MixpanelUploader&&) = delete;
 };
+
+struct StartupStatus {
+  db::Storage* db;
+  EPOCH_MILLISECONDS timestamp;  // The timestamp at which the last "event" has been added.
+
+  explicit StartupStatus(db::Storage* db) : db(db), timestamp(Now() - MILLISECONDS_INTERVAL(15000)) {}
+
+  EPOCH_MILLISECONDS Timestamp() {
+    const EPOCH_MILLISECONDS now = Now();
+    const MILLISECONDS_INTERVAL dt = now - timestamp;
+    const MILLISECONDS_INTERVAL new_dt = static_cast<MILLISECONDS_INTERVAL>(static_cast<double>(dt) * 0.99);
+    timestamp = now - new_dt;
+    return timestamp;
+  }
+};
+
+struct StartupEntry {
+  virtual void Populate(StartupStatus& status) const = 0;
+
+  template <typename A>
+  void serialize(A&) {}
+};
+
+struct StartupEntryUser : StartupEntry {
+  typedef StartupEntry CEREAL_BASE_TYPE;
+
+  std::string name;
+  std::string bio;
+  std::set<std::string> tags;
+
+  virtual void Populate(StartupStatus& status) const override {
+    status.db->DoAddUser(name, status.Timestamp());
+  }
+
+  template <typename A>
+  void serialize(A& ar) {
+    ar(CEREAL_NVP(name), CEREAL_NVP(bio), CEREAL_NVP(tags));
+  }
+};
+
+struct StartupEntryQuestion : StartupEntry {
+  typedef StartupEntry CEREAL_BASE_TYPE;
+
+  std::string text;
+  std::vector<std::string> agrees;
+  std::vector<std::string> disagrees;
+  std::set<std::string> tags;
+
+  virtual void Populate(StartupStatus& status) const override {
+    const auto qid = status.db->DoAddQuestion(text, status.Timestamp()).qid;
+    for (const auto uid : agrees) {
+      status.db->DoAddAnswer(uid, qid, schema::ANSWER::AGREE, status.Timestamp());
+    }
+    for (const auto uid : disagrees) {
+      status.db->DoAddAnswer(uid, qid, schema::ANSWER::DISAGREE, status.Timestamp());
+    }
+  }
+
+  template <typename A>
+  void serialize(A& ar) {
+    ar(CEREAL_NVP(text), CEREAL_NVP(agrees), CEREAL_NVP(disagrees), CEREAL_NVP(tags));
+  }
+};
+
+CEREAL_REGISTER_TYPE(StartupEntryUser);
+CEREAL_REGISTER_TYPE(StartupEntryQuestion);
 
 struct Controller {
  public:
@@ -748,43 +821,11 @@ struct Controller {
     HTTP(port_).Register("/" + demo_id_ + "/a/raw", std::ref(*db_));
 
     // Pre-populate a few users, questions and answers to start from.
-    db->DoAddUser("alice", Now() - MILLISECONDS_INTERVAL(9000));
-    db->DoAddUser("barbie", Now() - MILLISECONDS_INTERVAL(8000));
-    db->DoAddUser("cindy", Now() - MILLISECONDS_INTERVAL(7000));
-    db->DoAddUser("daphne", Now() - MILLISECONDS_INTERVAL(6000));
-    db->DoAddUser("eve", Now() - MILLISECONDS_INTERVAL(5000));
-    db->DoAddUser("fiona", Now() - MILLISECONDS_INTERVAL(4000));
-    db->DoAddUser("gina", Now() - MILLISECONDS_INTERVAL(3000));
-    db->DoAddUser("helen", Now() - MILLISECONDS_INTERVAL(2000));
-    db->DoAddUser("irene", Now() - MILLISECONDS_INTERVAL(1000));
-
-    const auto vi = db->DoAddQuestion("Vi is the best text editor.", Now() - MILLISECONDS_INTERVAL(4500)).qid;
-    const auto weed = db->DoAddQuestion("Marijuana should be legal.", Now() - MILLISECONDS_INTERVAL(3500)).qid;
-    const auto bubble = db->DoAddQuestion("We are in the bubble.", Now() - MILLISECONDS_INTERVAL(2500)).qid;
-    const auto movies = db->DoAddQuestion("Movies are getting worse.", Now() - MILLISECONDS_INTERVAL(1500)).qid;
-
-    db->DoAddAnswer("alice", vi, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("alice", weed, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("barbie", movies, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("barbie", bubble, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("cindy", vi, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("cindy", weed, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("cindy", bubble, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("cindy", movies, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("daphne", vi, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("daphne", weed, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("daphne", bubble, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("daphne", movies, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("eve", weed, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("eve", movies, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("fiona", weed, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("fiona", movies, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("gina", weed, schema::ANSWER::AGREE, Now());
-    db->DoAddAnswer("gina", movies, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("helen", weed, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("helen", movies, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("irene", weed, schema::ANSWER::DISAGREE, Now());
-    db->DoAddAnswer("irene", movies, schema::ANSWER::DISAGREE, Now());
+    bricks::cerealize::GenericCerealFileParser<StartupEntry, bricks::cerealize::CerealFormat::JSON> f(
+        FLAGS_startup_data);
+    StartupStatus status(db);
+    while (f.Next([&status](const StartupEntry& e) { e.Populate(status); }))
+      ;
   }
 
   void Actions(Request r) {
@@ -851,7 +892,46 @@ struct Controller {
   Controller() = delete;
 };
 
-int main() {
+// Generates initial input data for a few users, questions and answers to start from.
+// This method appends to `data.json`. To re-generate the contents, manually remove the file first.
+void GenerateStartupData() {
+  StartupEntryUser user;
+  StartupEntryQuestion question;
+
+  bricks::cerealize::GenericCerealFileAppender<bricks::cerealize::CerealFormat::JSON> f(FLAGS_startup_data);
+
+  user.name = "Ann";
+  user.bio = "Female, 21. College student, majoring in social science. Loves to travel around the world.";
+  user.tags = {"politics", "lifestyle"};
+  f << user;
+
+  user.name = "Jack";
+  user.bio = "Male, 32. Construction worker. Big fan of Red Sox baseball team.";
+  user.tags = {"sport"};
+  f << user;
+
+  question.text = "More companies should go public.";
+  question.tags = {"business"};
+  question.agrees = {"Jack"};    // What a jackass, go study some business, bro!
+  question.disagrees = {"Ann"};  // Clever girl.
+  f << question;
+
+  // To beautify the output JSON before editing it manually:
+  /*
+     (echo "var f = 'data.json'; var fs = require('fs');";
+      echo "fs.writeFileSync(f, JSON.stringify(JSON.parse(fs.readFileSync(f)), null, 2));") | node
+  */
+}
+
+int main(int argc, char** argv) {
+  ParseDFlags(&argc, &argv);
+
+  if (FLAGS_gen) {
+    GenerateStartupData();
+    std::cout << FLAGS_startup_data << " has been appended to." << std::endl;
+    return 0;
+  }
+
   const int port = FLAGS_port;
 
   // Create and redirect to a new demo when POST-ed onto `/new`.
