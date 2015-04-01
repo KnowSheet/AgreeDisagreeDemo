@@ -1,0 +1,49 @@
+{
+  "value0": {
+    "polymorphic_id": 2147483649,
+    "polymorphic_name": "StartupEntryUser",
+    "ptr_wrapper": {
+      "valid": 1,
+      "data": {
+        "name": "Ann",
+        "bio": "Female, 21. College student, majoring in social science. Loves to travel around the world.",
+        "tags": [
+          "lifestyle",
+          "politics"
+        ]
+      }
+    }
+  },
+  "value1": {
+    "polymorphic_id": 1,
+    "ptr_wrapper": {
+      "valid": 1,
+      "data": {
+        "name": "Jack",
+        "bio": "Male, 32. Construction worker. Big fan of Red Sox baseball team.",
+        "tags": [
+          "sport"
+        ]
+      }
+    }
+  },
+  "value2": {
+    "polymorphic_id": 2147483650,
+    "polymorphic_name": "StartupEntryQuestion",
+    "ptr_wrapper": {
+      "valid": 1,
+      "data": {
+        "text": "More companies should go public.",
+        "agrees": [
+          "Jack"
+        ],
+        "disagrees": [
+          "Ann"
+        ],
+        "tags": [
+          "business"
+        ]
+      }
+    }
+  }
+}
